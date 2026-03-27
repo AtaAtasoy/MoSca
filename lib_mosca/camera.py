@@ -1,1 +1,1 @@
-../lib_moca/camera.py
+from lib_moca.camera import *

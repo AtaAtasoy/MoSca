@@ -7,9 +7,8 @@ from lib_prior.prior_loading import Saved2D
 from lib_moca.moca import moca_solve
 from lib_moca.camera import MonocularCameras
 
-from mosca_evaluate import test_tum_cam, test_sintel_cam
-
 from data_utils.iphone_helpers import load_iphone_gt_poses
+from data_utils.known_camera_helpers import load_vipe_camera_priors
 from data_utils.nvidia_helpers import load_nvidia_gt_pose, get_nvidia_dummy_test
 
 from recon_utils import (
@@ -53,6 +52,38 @@ def load_gt_cam(ws, fit_cfg):
     return
 
 
+def load_known_camera_init(ws, fit_cfg, s2d):
+    known_camera_mode = getattr(fit_cfg, "known_camera_mode", None)
+    if known_camera_mode is None:
+        return None
+    assert known_camera_mode in [
+        "init",
+    ], f"Unsupported known_camera_mode={known_camera_mode}"
+
+    known_camera_format = getattr(fit_cfg, "known_camera_format", "vipe")
+    if known_camera_format == "vipe":
+        pose_path = getattr(fit_cfg, "known_camera_pose_path", None)
+        intr_path = getattr(fit_cfg, "known_camera_intrinsics_path", None)
+        priors = load_vipe_camera_priors(
+            pose_npz_path=pose_path,
+            intrinsics_npz_path=intr_path,
+            expected_T=s2d.T,
+        )
+        cams = MonocularCameras(
+            n_time_steps=s2d.T,
+            default_H=s2d.H,
+            default_W=s2d.W,
+            K=priors["K"],
+            delta_flag=False,
+            init_camera_pose=priors["T_wc"],
+            iso_focal=getattr(fit_cfg, "iso_focal", False),
+        )
+        logging.info("Initialized cameras from external VIPE priors")
+        return cams
+
+    raise RuntimeError(f"Unknown known_camera_format={known_camera_format}")
+
+
 def static_reconstruct(ws, log_path, fit_cfg):
     seed_everything(SEED)
     DEPTH_DIR, TAP_MODE = auto_get_depth_dir_tap_mode(ws, fit_cfg)
@@ -78,7 +109,10 @@ def static_reconstruct(ws, log_path, fit_cfg):
         .load_vos()
     )
 
-    if INIT_GT_CAMERA_FLAG:
+    known_cams = load_known_camera_init(ws, fit_cfg, s2d)
+    if known_cams is not None:
+        cams = known_cams
+    elif INIT_GT_CAMERA_FLAG:
         # if start form gt camera, load gt camera here
         logging.info(f"Initializing from GT camera")
         (
@@ -166,9 +200,14 @@ def static_reconstruct(ws, log_path, fit_cfg):
     )  # ! S2D is changed becuase the depth is re-scaled
 
     datamode = getattr(fit_cfg, "mode", "iphone")
+    test_tum_cam = test_sintel_cam = None
     if datamode == "sintel":
+        from mosca_evaluate import test_sintel_cam
+
         test_func = test_sintel_cam
     elif datamode == "tum":
+        from mosca_evaluate import test_tum_cam
+
         test_func = test_tum_cam
     else:
         test_func = None

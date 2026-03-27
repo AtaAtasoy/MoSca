@@ -3,7 +3,6 @@ import os.path as osp
 import shutil
 import platform
 import logging
-from tensorboardX import SummaryWriter
 import datetime
 import numpy as np, torch, random
 import imageio
@@ -17,6 +16,11 @@ import time
 import logging
 from scipy.optimize import least_squares
 from matplotlib import pyplot as plt
+
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 
 def make_video(src_dir, dst_fn):
@@ -66,7 +70,9 @@ def create_log(log_dir, debug=False):
     shutil.copy(main_path, backup_dir)
     main_path = osp.join(lib_dir, "../prepare.py")
     shutil.copy(main_path, backup_dir)
-    writer = SummaryWriter(log_dir=tb_dir)
+    writer = SummaryWriter(log_dir=tb_dir) if SummaryWriter is not None else None
+    if writer is None:
+        logging.warning("tensorboardX is not installed; tensorboard logging is disabled")
     configure_logging(osp.join(log_dir, f"{get_timestamp()}.log"), debug=debug)
     return writer
 

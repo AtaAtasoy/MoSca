@@ -3,7 +3,6 @@ import imageio
 import sys, os, os.path as osp
 import numpy as np
 import logging
-import kornia
 from omegaconf import OmegaConf
 
 from lib_prior.prior_loading import Saved2D
@@ -26,7 +25,6 @@ from lib_mosca.dynamic_solver_utils import (
 )
 
 from mosca_viz import viz_main, viz_list_of_colored_points_in_cam_frame
-from mosca_evaluate import test_tum_cam, test_sintel_cam, test_main, test_pck, test_fps
 from lite_moca_reconstruct import static_reconstruct
 
 from recon_utils import (
@@ -55,6 +53,8 @@ def get_static_render_error_mask(s2d, log_path, render_error_th, open_ksize=-1):
         (render_error_mask_viz * 255).astype(np.uint8),
     )
     if open_ksize > 0:
+        import kornia
+
         kernel = torch.ones(3, 3).to(render_error_mask)
         render_error_mask = kornia.morphology.opening(render_error_mask, kernel)
     return render_error_mask
@@ -186,8 +186,12 @@ def photometric_warmup(ws, log_path, fit_cfg):
 
     datamode = getattr(fit_cfg, "mode", "iphone")
     if datamode == "sintel":
+        from mosca_evaluate import test_sintel_cam
+
         test_func = test_sintel_cam
     elif datamode == "tum":
+        from mosca_evaluate import test_tum_cam
+
         test_func = test_tum_cam
     else:
         test_func = None
@@ -741,8 +745,12 @@ if __name__ == "__main__":
     # * EVAL AND VIZ
     datamode = getattr(cfg, "mode", "iphone")
     if datamode == "sintel":
+        from mosca_evaluate import test_sintel_cam
+
         test_func = test_sintel_cam
     elif datamode == "tum":
+        from mosca_evaluate import test_tum_cam
+
         test_func = test_tum_cam
     else:
         test_func = None
@@ -756,6 +764,8 @@ if __name__ == "__main__":
     if datamode in ["iphone"]:
         try:
             seq_name = osp.basename(args.ws)
+            from mosca_evaluate import test_pck
+
             test_pck(
                 saved_dir=logdir,
                 gt_npz_fn=f"./eval_utils/pck_gt_packs/{seq_name}_train_pck.npz",
@@ -766,32 +776,45 @@ if __name__ == "__main__":
             logging.warning("PCK5 failed")
             pass
 
-    test_fps(saved_dir=logdir, rounds=1 if datamode in ["iphone"] else 3)
+    try:
+        from mosca_evaluate import test_fps
+
+        test_fps(saved_dir=logdir, rounds=1 if datamode in ["iphone"] else 3)
+    except ModuleNotFoundError as exc:
+        logging.warning(f"Skip FPS eval due to missing dependency: {exc}")
 
     if datamode in ["iphone", "nvidia"]:
-        test_main(
-            cfg,
-            saved_dir=logdir,
-            data_root=args.ws,
-            device=torch.device("cuda"),
-            tto_flag=True,
-            eval_also_dyncheck_non_masked=False,
-            skip_test_gen=False,
-        )
+        try:
+            from mosca_evaluate import test_main
+
+            test_main(
+                cfg,
+                saved_dir=logdir,
+                data_root=args.ws,
+                device=torch.device("cuda"),
+                tto_flag=True,
+                eval_also_dyncheck_non_masked=False,
+                skip_test_gen=False,
+            )
+        except ModuleNotFoundError as exc:
+            logging.warning(f"Skip dataset eval due to missing dependency: {exc}")
 
     if not args.no_viz and datamode in ["wild"]:
-        from mosca_viz import viz_main
+        try:
+            from mosca_viz import viz_main
 
-        viz_main(
-            save_dir=osp.join(logdir, "viz"),
-            log_dir=logdir,
-            cfg_fn=args.cfg,
-            N=getattr(cfg, "viz_N", 5),
-            move_angle_deg=getattr(cfg, "viz_move_angle_deg", 10.0),
-            H_3d=getattr(cfg, "viz_H_3d", 960),
-            W_3d=getattr(cfg, "viz_W_3d", 960),
-            fov_3d=getattr(cfg, "viz_fov_3d", 70),
-            back_ratio_3d=getattr(cfg, "viz_back_ratio_3d", 1.5),
-            up_ratio=getattr(cfg, "viz_up_ratio", 0.05),
-            bg_color=getattr(cfg, "photo_default_bg_color", [0.0, 0.0, 0.0]),
-        )
+            viz_main(
+                save_dir=osp.join(logdir, "viz"),
+                log_dir=logdir,
+                cfg_fn=args.cfg,
+                N=getattr(cfg, "viz_N", 5),
+                move_angle_deg=getattr(cfg, "viz_move_angle_deg", 10.0),
+                H_3d=getattr(cfg, "viz_H_3d", 960),
+                W_3d=getattr(cfg, "viz_W_3d", 960),
+                fov_3d=getattr(cfg, "viz_fov_3d", 70),
+                back_ratio_3d=getattr(cfg, "viz_back_ratio_3d", 1.5),
+                up_ratio=getattr(cfg, "viz_up_ratio", 0.05),
+                bg_color=getattr(cfg, "photo_default_bg_color", [0.0, 0.0, 0.0]),
+            )
+        except Exception as exc:
+            logging.exception(f"Final visualization failed, but reconstruction is complete: {exc}")

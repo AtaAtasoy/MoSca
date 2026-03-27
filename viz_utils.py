@@ -35,6 +35,16 @@ from matplotlib.colors import hsv_to_rgb
 from sklearn.decomposition import PCA
 
 
+def _match_sph_dim(sph, target_dim):
+    if sph.shape[1] == target_dim:
+        return sph
+    if sph.shape[1] < target_dim:
+        if sph.shape[0] == 0:
+            return sph.new_empty((0, target_dim))
+        return F.pad(sph, (0, target_dim - sph.shape[1], 0, 0))
+    return sph[:, :target_dim]
+
+
 @torch.no_grad()
 def make_viz_np(
     gt,
@@ -295,8 +305,7 @@ def viz_single_2d_flow_video(
 
     flow_sph = RGB2SH(torch.from_numpy(node_colors).to(pts_first.device).float())
     pad_sph_dim = s_model()[-1].shape[1]
-    if pad_sph_dim > flow_sph.shape[1]:
-        flow_sph = F.pad(flow_sph, (0, pad_sph_dim - flow_sph.shape[1], 0, 0))
+    flow_sph = _match_sph_dim(flow_sph, pad_sph_dim)
 
     flow_mu = pts_first
     flow_fr = (
@@ -318,8 +327,7 @@ def viz_single_2d_flow_video(
         bg_gray = torch.mean(bg_rgb, dim=1, keepdim=True).expand(-1, 3)
         # convert to gray scale
         bg_sph = RGB2SH(bg_gray)
-        if pad_sph_dim > bg_sph.shape[1]:
-            bg_sph = F.pad(bg_sph, (0, pad_sph_dim - bg_sph.shape[1], 0, 0))
+        bg_sph = _match_sph_dim(bg_sph, pad_sph_dim)
         gs5_bg[-1] = bg_sph
 
     max_buffer_size = len(flow_mu) * (line_N + 1) * max_T
@@ -441,8 +449,7 @@ def viz_single_2d_node_video(
     node_colors = map_colors(node_first.detach().cpu().numpy())
     node_sph = RGB2SH(torch.from_numpy(node_colors).to(node_first.device).float())
     pad_sph_dim = s_model()[-1].shape[1]
-    if pad_sph_dim > node_sph.shape[1]:
-        node_sph = F.pad(node_sph, (0, pad_sph_dim - node_sph.shape[1], 0, 0))
+    node_sph = _match_sph_dim(node_sph, pad_sph_dim)
 
     # node_s1 = d_model.scf.node_sigma.expand(-1, 3) * node_r1_factor  # 0.333  # * 0.05
     node_s1 = (
@@ -457,8 +464,7 @@ def viz_single_2d_node_video(
 
     line_sph = torch.tensor(line_color).to(node_sph.device).float()[None]
     line_sph = RGB2SH(line_sph)
-    if pad_sph_dim > line_sph.shape[1]:
-        line_sph = F.pad(line_sph, (0, pad_sph_dim - line_sph.shape[1], 0, 0))
+    line_sph = _match_sph_dim(line_sph, pad_sph_dim)
 
     # ! gray-scale the bg
     gs5_bg = list(s_model())
@@ -467,8 +473,7 @@ def viz_single_2d_node_video(
         bg_gray = torch.mean(bg_rgb, dim=1, keepdim=True).expand(-1, 3)
         # convert to gray scale
         bg_sph = RGB2SH(bg_gray)
-        if pad_sph_dim > bg_sph.shape[1]:
-            bg_sph = F.pad(bg_sph, (0, pad_sph_dim - bg_sph.shape[1], 0, 0))
+        bg_sph = _match_sph_dim(bg_sph, pad_sph_dim)
         gs5_bg[-1] = bg_sph
 
     for cam_tid in tqdm(range(len(pose_list))):
@@ -682,19 +687,20 @@ def viz_single_2d_camera_video(
         gs5_cat[-2] = new_opa
 
         # convert to gray scale
-        gray_sph = RGB2SH(
-            torch.mean(
-                SH2RGB(gs5_cat[-1][~visible_mask, :3]), dim=1, keepdim=True
-            ).expand(-1, 3)
-        )
-        gray_sph[:, 0] = (
-            gray_sph[:, 0] * (1.0 - inivisble_red_ratio) + inivisble_red_ratio
-        )
-        gray_sph[:, 1:] = gray_sph[:, 1:] * (1.0 - inivisble_red_ratio) + 0.0
         pad_sph_dim = s_model()[-1].shape[1]
-        if pad_sph_dim > gray_sph.shape[1]:
-            gray_sph = F.pad(gray_sph, (0, pad_sph_dim - gray_sph.shape[1], 0, 0))
-        gs5_cat[-1][~visible_mask] = gray_sph
+        invisible_mask = ~visible_mask
+        if invisible_mask.any():
+            gray_sph = RGB2SH(
+                torch.mean(
+                    SH2RGB(gs5_cat[-1][invisible_mask, :3]), dim=1, keepdim=True
+                ).expand(-1, 3)
+            )
+            gray_sph[:, 0] = (
+                gray_sph[:, 0] * (1.0 - inivisble_red_ratio) + inivisble_red_ratio
+            )
+            gray_sph[:, 1:] = gray_sph[:, 1:] * (1.0 - inivisble_red_ratio) + 0.0
+            gray_sph = _match_sph_dim(gray_sph, pad_sph_dim)
+            gs5_cat[-1][invisible_mask] = gray_sph
 
         # * draw also the current camera frame in the scene
         add_mu = cams.trans_pts_to_world(working_t, camera_mu)
@@ -705,8 +711,7 @@ def viz_single_2d_camera_video(
         add_o = torch.ones_like(add_s[:, :1]) * 1.0  # 0.4
         add_sph = torch.ones_like(add_s) * 0.0
         add_sph[:, 1] = 1.0
-        if pad_sph_dim > add_sph.shape[1]:
-            add_sph = F.pad(add_sph, (0, pad_sph_dim - add_sph.shape[1], 0, 0))
+        add_sph = _match_sph_dim(add_sph, pad_sph_dim)
 
         render_dict = render(
             [

@@ -1,7 +1,7 @@
 import torch
 import logging, glob, sys, os, shutil, os.path as osp
 from datetime import datetime
-import numpy as np, random, kornia
+import numpy as np, random
 import imageio
 
 from lib_render.render_helper import GS_BACKEND
@@ -222,6 +222,8 @@ def update_s2d_track_identification(
 
 
 def set_epi_mask_to_s2d_for_bg_render(s2d, epi_th, device):
+    import kornia
+
     assert s2d.has_epi, "EPI is required for static warm"
     static_mask = s2d.epi < epi_th
     # erode the static mask

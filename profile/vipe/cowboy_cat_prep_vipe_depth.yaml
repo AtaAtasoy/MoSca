@@ -1,0 +1,22 @@
+dep_mode: vipe
+known_depth_format: vipe_scene_npy
+known_depth_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene
+
+known_camera_format: vipe
+known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/intrinsics/851422b7258e44a7ad04a9789be82299.npz
+
+tap_mode: bootstapir
+flow_mode: raft
+
+epi_th: 0.0001
+depth_boundary_th: 1.0
+
+tap_chunk_size: 16384
+n_track_uniform: 16384
+n_track_dynamic: 16384
+
+flow_steps: [1, 3]
+epi_num_threads: 16
+
+align_metric_flag: False
+boundary_enhance_th: -1.0

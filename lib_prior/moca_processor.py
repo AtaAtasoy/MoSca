@@ -11,12 +11,12 @@ sys.path.append(osp.dirname(osp.abspath(__file__)))
 from preprocessor_utils import configure_logging, seed_everything, make_video
 from prior_loading import laplacian_filter_depth
 from epi_error.epi_analysis import analyze_epi
-import kornia
 from torch import nn
 from scipy.interpolate import griddata
 
 from preprocessor_utils import align_disparity_to_metric_depth
 from depth_models.depth_utils import viz_depth_list, save_depth_list
+from data_utils.known_camera_helpers import load_vipe_depth_priors
 
 
 def fill_depth_boundaries(depth_map, boundary_mask):
@@ -53,6 +53,8 @@ def fill_depth_boundaries(depth_map, boundary_mask):
 
 @torch.no_grad()
 def mark_dynamic_region(dyn_track, dyn_track_mask, H, W, radius_ratio=0.05):
+    import kornia
+
     # T,N,2
     # draw a circle with radius 0.05*max(H,W) around the dynamic track when it's visible
     T, N = dyn_track.shape[:2]
@@ -324,9 +326,49 @@ class MoCaPrep:
         metric_alignment_bias_flag=True,
         metric_alignment_kernel="cauchy",
         metric_alignment_fscale=0.001,
+        external_depth_src=None,
+        external_depth_format=None,
     ):
+        depth_save_dir = osp.join(save_dir, f"{self.dep_mode}_depth")
         if not hasattr(self, "depth_model"):
-            logging.warning(f"Depth model not loaded, skip depth")
+            if external_depth_src is None:
+                logging.warning(
+                    "Depth model not loaded and no external depth priors were provided, skip depth"
+                )
+                return
+            logging.info(
+                f"Import external depth priors format={external_depth_format} from {external_depth_src}"
+            )
+            if external_depth_format in ["vipe", "vipe_scene_npy", None]:
+                dep_list = load_vipe_depth_priors(
+                    external_depth_src, expected_T=len(fn_list)
+                )
+            else:
+                raise RuntimeError(
+                    f"Unsupported external_depth_format={external_depth_format}"
+                )
+            save_depth_list(dep_list, fn_list, depth_save_dir)
+            viz_depth_list(dep_list, depth_save_dir + ".mp4")
+            if enhance_depth_boudary_th > 0:
+                assert (
+                    enhance_depth_boudary_open_ksize >= 3
+                ), "To have reasonable boundary enhancement, open_ksize should be >=3"
+                fixed_dep, fix_mask = self.enhance_depth_boundary(
+                    dep_list,
+                    boundary_th_ratio=enhance_depth_boudary_th,
+                    ksize=enhance_depth_boudary_ksize,
+                    open_ksize=enhance_depth_boudary_open_ksize,
+                )
+                viz_depth_list(fixed_dep, depth_save_dir + "_sharp.mp4")
+                save_depth_list(fixed_dep, fn_list, depth_save_dir + "_sharp")
+                imageio.mimsave(
+                    osp.join(
+                        save_dir,
+                        f"sharper_boundary_mask_th={enhance_depth_boudary_th}_ks={enhance_depth_boudary_ksize}_oks={enhance_depth_boudary_open_ksize}.mp4",
+                    ),
+                    fix_mask.astype(np.uint8) * 255,
+                )
+                logging.info(f"Enhanced depth saved to {depth_save_dir}_sharp")
             return
         start_t = time.time()
         seed_everything(self.seed)
@@ -342,8 +384,6 @@ class MoCaPrep:
             self.sky_model.to("cpu"), torch.cuda.empty_cache()
         else:
             invalid_mask_list = None
-
-        depth_save_dir = osp.join(save_dir, f"{self.dep_mode}_depth")
 
         if self.dep_mode == "metric3d":
             # * metric 3d needs the K
@@ -606,6 +646,8 @@ class MoCaPrep:
         boundary_enhance_th=1.0,
         boundary_enhance_ksize=5,
         boundary_enhance_open_ksize=3,
+        external_depth_src=None,
+        external_depth_format=None,
     ):
         # todo: modify the epi interface
         # todo: modify the tap interface
@@ -637,6 +679,8 @@ class MoCaPrep:
             metric_alignment_bias_flag=metric_alignment_bias_flag,
             metric_alignment_kernel=metric_alignment_kernel,
             metric_alignment_fscale=metric_alignment_fscale,
+            external_depth_src=external_depth_src,
+            external_depth_format=external_depth_format,
         )
         ########################################################################
         # # * 3. Flow and Epi error [Opt]

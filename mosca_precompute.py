@@ -5,7 +5,6 @@ import numpy as np
 import sys
 
 from lib_prior.moca_processor import MoCaPrep
-from lib_prior.preprocessor_utils import load_imgs, convert_from_mp4
 from lib_prior.prior_loading import Saved2D, visualize_track
 from lib_prior.moca_processor import mark_dynamic_region
 
@@ -20,6 +19,7 @@ import logging
 from lib_prior.moca_processor import *
 from omegaconf import OmegaConf
 from lib_moca.moca_misc import make_pair_list
+from data_utils.known_camera_helpers import load_vipe_intrinsics_K
 import random
 
 
@@ -50,17 +50,36 @@ def get_moca_processor(pre_cfg):
 
 
 def load_imgs_from_dir(src):
-    img_dir = osp.join(src, "images")
     img_fns = sorted(
-        [it for it in os.listdir(img_dir) if it.endswith(".png") or it.endswith(".jpg")]
+        [it for it in os.listdir(src) if it.endswith(".png") or it.endswith(".jpg")]
     )
-    img_list = [imageio.imread(osp.join(img_dir, it))[..., :3] for it in img_fns]
+    img_list = [imageio.imread(osp.join(src, it))[..., :3] for it in img_fns]
     return img_list, img_fns
 
 
-def load_imgs_from_mp4():
-    raise RuntimeError("Not implemented yet")
-    return
+def load_imgs_from_mp4(src):
+    video_reader = imageio.get_reader(src)
+    img_list = [frame[..., :3] for frame in video_reader.iter_data()]
+    img_fns = [f"{i:05d}.png" for i in range(len(img_list))]
+    return img_list, img_fns
+
+
+def load_imgs(src):
+    if osp.isdir(osp.join(src, "images")):
+        return load_imgs_from_dir(osp.join(src, "images"))
+    if src.endswith(".mp4"):
+        return load_imgs_from_mp4(src)
+    raise ValueError(f"Unsupported input source: {src}")
+
+
+def get_known_camera_K(pre_cfg):
+    known_camera_format = getattr(pre_cfg, "known_camera_format", None)
+    intrinsics_path = getattr(pre_cfg, "known_camera_intrinsics_path", None)
+    if intrinsics_path is None:
+        return None
+    if known_camera_format in ["vipe", None]:
+        return load_vipe_intrinsics_K(intrinsics_path)
+    raise RuntimeError(f"Unsupported known_camera_format={known_camera_format}")
 
 
 def preprocess(
@@ -86,6 +105,7 @@ def preprocess(
     )  # this is in the median=1.0 space
 
     TAP_CHUNK_SIZE = getattr(pre_cfg, "tap_chunk_size", 5000)
+    known_camera_K = get_known_camera_K(pre_cfg)
 
     moca_processor.process(
         t_list=None,
@@ -93,6 +113,7 @@ def preprocess(
         img_name_list=img_fns,
         save_dir=ws,
         n_track=getattr(pre_cfg, "n_track_uniform", 8192),
+        known_camera_K=known_camera_K,
         # depth crafter
         depthcrafter_denoising_steps=getattr(
             pre_cfg, "depthcrafter_denoising_steps", 25
@@ -114,6 +135,8 @@ def preprocess(
         boundary_enhance_th=BOUNDARY_EHNAHCE_TH,  # if > 0 will create a sharp dir
         # boost
         compute_flow=getattr(pre_cfg, "compute_flow", True),
+        external_depth_src=getattr(pre_cfg, "known_depth_path", None),
+        external_depth_format=getattr(pre_cfg, "known_depth_format", None),
     )
 
     if not resample_for_dynamic:
@@ -176,7 +199,7 @@ def preprocess(
         dep_list=moca_processor.load_dep_list(
             ws, f"{moca_processor.dep_mode}{DEPTH_DIR_POSTFIX}"
         ),
-        # K=cams.default_K.detach().cpu().numpy(), # ! maintain the same K as the first infered static one
+        K=known_camera_K,
         max_viz_cnt=getattr(pre_cfg, "max_viz_cnt", 512),
         chunk_size=TAP_CHUNK_SIZE,
     )
@@ -197,7 +220,7 @@ if __name__ == "__main__":
     )
     args, unknown = parser.parse_known_args()
 
-    img_list, img_fns = load_imgs_from_dir(args.ws)
+    img_list, img_fns = load_imgs(args.ws)
     prep_cfg = OmegaConf.load(args.cfg)
     cli_cfg = OmegaConf.from_dotlist([arg.lstrip('--') for arg in unknown])
     prep_cfg = OmegaConf.merge(prep_cfg, cli_cfg)
