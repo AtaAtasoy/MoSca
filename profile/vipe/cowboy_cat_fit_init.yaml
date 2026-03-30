@@ -3,6 +3,7 @@ mode: wild
 
 known_camera_mode: init
 known_camera_format: vipe
+known_camera_convention: opencv
 known_camera_pose_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/pose/851422b7258e44a7ad04a9789be82299.npz
 known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/intrinsics/851422b7258e44a7ad04a9789be82299.npz
 depth_dirname: vipe_depth

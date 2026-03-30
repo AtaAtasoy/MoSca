@@ -25,7 +25,7 @@ from lib_mosca.dynamic_solver_utils import (
 )
 
 from mosca_viz import viz_main, viz_list_of_colored_points_in_cam_frame
-from lite_moca_reconstruct import static_reconstruct
+from lite_moca_reconstruct import static_reconstruct, maybe_visualize_initial_cameras
 
 from recon_utils import (
     SEED,
@@ -726,11 +726,19 @@ if __name__ == "__main__":
     parser.add_argument("--ws", type=str, help="Source folder", required=True)
     parser.add_argument("--cfg", type=str, help="profile yaml file path", required=True)
     parser.add_argument("--no_viz", action="store_true", help="no viz")
+    parser.add_argument(
+        "--show-cameras",
+        action="store_true",
+        help="Visualize VIPE input cameras in 3D before optimization starts",
+    )
     args, unknown = parser.parse_known_args()
 
     cfg = OmegaConf.load(args.cfg)
     cli_cfg = OmegaConf.from_dotlist([arg.lstrip("--") for arg in unknown])
     cfg = OmegaConf.merge(cfg, cli_cfg)
+
+    if args.show_cameras:
+        maybe_visualize_initial_cameras(args.ws, cfg)
 
     logdir = setup_recon_ws(args.ws, fit_cfg=cfg)
 

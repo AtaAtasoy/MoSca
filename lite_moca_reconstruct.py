@@ -68,6 +68,9 @@ def load_known_camera_init(ws, fit_cfg, s2d):
             pose_npz_path=pose_path,
             intrinsics_npz_path=intr_path,
             expected_T=s2d.T,
+            camera_convention=getattr(
+                fit_cfg, "known_camera_convention", "opencv"
+            ),
         )
         cams = MonocularCameras(
             n_time_steps=s2d.T,
@@ -82,6 +85,60 @@ def load_known_camera_init(ws, fit_cfg, s2d):
         return cams
 
     raise RuntimeError(f"Unknown known_camera_format={known_camera_format}")
+
+
+def maybe_visualize_initial_cameras(ws, fit_cfg):
+    known_camera_mode = getattr(fit_cfg, "known_camera_mode", None)
+    if known_camera_mode is None:
+        logging.warning("`--show-cameras` requested, but no known camera mode is configured")
+        return
+    if known_camera_mode != "init":
+        logging.warning(
+            "`--show-cameras` currently only supports known_camera_mode=init, got %s",
+            known_camera_mode,
+        )
+        return
+
+    known_camera_format = getattr(fit_cfg, "known_camera_format", "vipe")
+    if known_camera_format != "vipe":
+        logging.warning(
+            "`--show-cameras` currently only supports VIPE camera priors, got %s",
+            known_camera_format,
+        )
+        return
+
+    pose_path = getattr(fit_cfg, "known_camera_pose_path", None)
+    intr_path = getattr(fit_cfg, "known_camera_intrinsics_path", None)
+    s2d = Saved2D(ws)
+    priors = load_vipe_camera_priors(
+        pose_npz_path=pose_path,
+        intrinsics_npz_path=intr_path,
+        expected_T=s2d.T,
+        camera_convention=getattr(fit_cfg, "known_camera_convention", "opencv"),
+    )
+
+    from visualize_mosca_cameras import visualize_camera_sets
+
+    logging.info("Showing VIPE input cameras before optimization. Close the window to continue.")
+    visualize_camera_sets(
+        camera_sets=[
+            {
+                "name": "input training cameras",
+                "T_wc": priors["T_wc"].detach().cpu().numpy(),
+                "K": priors["K"].detach().cpu().numpy(),
+                "color": "yellow",
+            }
+        ],
+        stride=1,
+        camera_scale=getattr(fit_cfg, "viz_camera_scale", 0.15),
+        screenshot=getattr(fit_cfg, "viz_camera_screenshot", None),
+        title_lines=[
+            "MoSca Cameras",
+            "OpenCV camera convention; saved poses are T_wc (cam->world)",
+            "Close this window to continue optimization",
+        ],
+    )
+    return
 
 
 def static_reconstruct(ws, log_path, fit_cfg):
@@ -227,11 +284,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("MoCa Reconstruction Camera Only")
     parser.add_argument("--ws", type=str, help="Source folder", required=True)
     parser.add_argument("--cfg", type=str, help="profile yaml file path", required=True)
+    parser.add_argument(
+        "--show-cameras",
+        action="store_true",
+        help="Visualize VIPE input cameras in 3D before optimization starts",
+    )
     args, unknown = parser.parse_known_args()
 
     cfg = OmegaConf.load(args.cfg)
     cli_cfg = OmegaConf.from_dotlist([arg.lstrip("--") for arg in unknown])
     cfg = OmegaConf.merge(cfg, cli_cfg)
+
+    if args.show_cameras:
+        maybe_visualize_initial_cameras(args.ws, cfg)
 
     logdir = setup_recon_ws(args.ws, fit_cfg=cfg)
 

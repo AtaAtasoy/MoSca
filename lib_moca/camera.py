@@ -40,8 +40,9 @@ class MonocularCameras(nn.Module):
         self.cxcy_ratio = nn.Parameter(cxcy_ratio)  # ! separate ratio for H=1, W=1
 
         param_cam_q, param_cam_t = self.__get_init_qt__(init_camera_pose)
-        self.q_wc = nn.Parameter(param_cam_q)
-        self.t_wc = nn.Parameter(param_cam_t)
+        # cam2world --> camera seen from world
+        self.q_wc = nn.Parameter(param_cam_q) # cam2world, quaternion, shape T,4
+        self.t_wc = nn.Parameter(param_cam_t) # cam2world, translation, shape T,3
 
         self.register_buffer("default_H", torch.tensor(default_H))
         self.register_buffer("default_W", torch.tensor(default_W))
@@ -152,7 +153,7 @@ class MonocularCameras(nn.Module):
         ret = torch.stack(ret)
         return ret  # ->until,4,4
 
-    def T_wc(self, ind):
+    def T_wc(self, ind): # returns cam2world
         # * core function
         assert ind >= 0 and ind < self.T, f"Invalid index {ind} for T={self.T}"
         if self.delta_flag:
@@ -171,7 +172,7 @@ class MonocularCameras(nn.Module):
         T_wc = self.T_wc(ind)
         return torch.linalg.inv(T_wc)
 
-    def Rt_wc(self, ind):
+    def Rt_wc(self, ind): # Returns cam2world rotation and translation
         T = self.T_wc(ind)
         return T[:3, :3], T[:3, -1]
 

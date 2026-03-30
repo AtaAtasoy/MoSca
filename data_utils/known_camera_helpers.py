@@ -20,11 +20,27 @@ def _sort_by_inds(values, inds):
     return values[order], np.asarray(inds)[order]
 
 
+def _convert_camera_pose_convention(T_wc_list, camera_convention):
+    camera_convention = camera_convention.lower()
+    if camera_convention in ["opencv", "open_cv"]:
+        return T_wc_list.astype(np.float32)
+    if camera_convention in ["opengl", "open_gl"]:
+        # Convert a cam->world transform from OpenGL camera axes to OpenCV camera axes.
+        # For c2w, this is a right-multiplication because we are changing the source
+        # camera basis while keeping the world basis fixed.
+        cv_from_gl = np.eye(4, dtype=np.float32)
+        cv_from_gl[1, 1] = -1.0
+        cv_from_gl[2, 2] = -1.0
+        return (T_wc_list @ cv_from_gl[None]).astype(np.float32)
+    raise ValueError(f"Unsupported camera_convention={camera_convention}")
+
+
 def load_vipe_camera_priors(
     pose_npz_path,
     intrinsics_npz_path,
     expected_T=None,
     intrinsics_tol=1e-4,
+    camera_convention="opencv",
 ):
     pose_data, pose_inds = _load_npz_data_and_inds(pose_npz_path)
     intr_data, intr_inds = _load_npz_data_and_inds(intrinsics_npz_path)
@@ -71,14 +87,16 @@ def load_vipe_camera_priors(
     K[1, 2] = cy
 
     logging.info(
-        "Loaded VIPE camera priors from %s with T=%d, fx=%.3f, fy=%.3f, cx=%.3f, cy=%.3f",
+        "Loaded VIPE camera priors from %s with T=%d, fx=%.3f, fy=%.3f, cx=%.3f, cy=%.3f, convention=%s",
         pose_npz_path,
         len(pose_data),
         fx,
         fy,
         cx,
         cy,
+        camera_convention,
     )
+    pose_data = _convert_camera_pose_convention(pose_data, camera_convention)
     return {
         "T_wc": torch.from_numpy(pose_data).float(),
         "K": torch.from_numpy(K).float(),
