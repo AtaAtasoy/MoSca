@@ -22,6 +22,64 @@ def seed_everything(seed=SEED):
     torch.backends.cudnn.deterministic = True
 
 
+def get_geometry_policy(fit_cfg):
+    known_scene_mode = getattr(fit_cfg, "known_scene_mode", None)
+    known_camera_mode = getattr(fit_cfg, "known_camera_mode", None)
+    known_depth_mode = getattr(fit_cfg, "known_depth_mode", None)
+
+    freeze_camera_geometry = known_scene_mode == "fixed" or known_camera_mode == "fixed"
+    freeze_depth_geometry = known_scene_mode == "fixed" or known_depth_mode == "fixed"
+
+    return {
+        "freeze_camera_geometry": freeze_camera_geometry,
+        "freeze_depth_geometry": freeze_depth_geometry,
+        "apply_depth_normalization": not freeze_depth_geometry,
+        "optimize_bundle_depth": not freeze_depth_geometry,
+        "replay_bundle_depth": not freeze_depth_geometry,
+    }
+
+
+def log_geometry_policy(fit_cfg, prefix="Geometry policy"):
+    policy = get_geometry_policy(fit_cfg)
+    logging.info(
+        "%s: freeze_camera_geometry=%s, freeze_depth_geometry=%s, apply_depth_normalization=%s, optimize_bundle_depth=%s, replay_bundle_depth=%s",
+        prefix,
+        policy["freeze_camera_geometry"],
+        policy["freeze_depth_geometry"],
+        policy["apply_depth_normalization"],
+        policy["optimize_bundle_depth"],
+        policy["replay_bundle_depth"],
+    )
+    return policy
+
+
+def get_scene_world_unit_scale(s2d):
+    scale_nw = float(getattr(s2d, "scale_nw", 1.0))
+    if abs(scale_nw) < 1e-12:
+        return 1.0
+    return 1.0 / scale_nw
+
+
+def maybe_rescale_world_threshold(value, s2d, fit_cfg, name="threshold"):
+    if value is None:
+        return None
+    if value < 0:
+        return value
+    policy = get_geometry_policy(fit_cfg)
+    if not policy["freeze_depth_geometry"]:
+        return value
+    scale = get_scene_world_unit_scale(s2d)
+    scaled_value = value * scale
+    logging.info(
+        "Faithful geometry mode: rescale %s from %.6f to %.6f using world_unit_scale=%.6f",
+        name,
+        value,
+        scaled_value,
+        scale,
+    )
+    return scaled_value
+
+
 def setup_recon_ws(ws, fit_cfg, logdir="logs"):
     seed_everything(SEED)
     # get datetime

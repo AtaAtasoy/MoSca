@@ -4,6 +4,7 @@ from glob import glob
 
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 
 
 def _load_npz_data_and_inds(npz_path):
@@ -18,6 +19,75 @@ def _load_npz_data_and_inds(npz_path):
 def _sort_by_inds(values, inds):
     order = np.argsort(inds)
     return values[order], np.asarray(inds)[order]
+
+
+def _load_pose_data_and_inds(pose_path):
+    assert pose_path is not None, "Expected a path to a VIPE pose prior file"
+    assert osp.exists(pose_path), f"Camera prior file not found: {pose_path}"
+
+    if pose_path.endswith(".npz"):
+        pose_data, pose_inds = _load_npz_data_and_inds(pose_path)
+        pose_data, pose_inds = _sort_by_inds(pose_data, pose_inds)
+        assert pose_data.ndim == 3 and pose_data.shape[1:] == (
+            4,
+            4,
+        ), f"Expected pose data shape (T,4,4), got {pose_data.shape}"
+        return pose_data.astype(np.float32), pose_inds
+
+    if pose_path.endswith(".txt"):
+        pose_rows = np.loadtxt(pose_path, dtype=np.float64)
+        pose_rows = np.atleast_2d(pose_rows)
+        assert pose_rows.shape[1] == 8, (
+            f"Expected pose text rows with 8 values "
+            f"'frame_idx tx ty tz qw qx qy qz', got shape {pose_rows.shape}"
+        )
+        pose_inds = pose_rows[:, 0].round().astype(np.int64)
+        pose_data = np.tile(np.eye(4, dtype=np.float32), (len(pose_rows), 1, 1))
+        quat_xyzw = pose_rows[:, [5, 6, 7, 4]]
+        pose_data[:, :3, :3] = Rotation.from_quat(quat_xyzw).as_matrix().astype(
+            np.float32
+        )
+        pose_data[:, :3, 3] = pose_rows[:, 1:4].astype(np.float32)
+        return _sort_by_inds(pose_data, pose_inds)
+
+    raise ValueError(f"Unsupported VIPE pose prior file: {pose_path}")
+
+
+def _load_intrinsics_data_and_inds(intrinsics_path):
+    assert (
+        intrinsics_path is not None
+    ), "Expected a path to a VIPE intrinsics prior file"
+    assert osp.exists(intrinsics_path), f"Camera prior file not found: {intrinsics_path}"
+
+    if intrinsics_path.endswith(".npz"):
+        intr_data, intr_inds = _load_npz_data_and_inds(intrinsics_path)
+        intr_data, intr_inds = _sort_by_inds(intr_data, intr_inds)
+        assert (
+            intr_data.ndim == 2 and intr_data.shape[1] == 4
+        ), f"Expected intrinsics data shape (T,4), got {intr_data.shape}"
+        return intr_data.astype(np.float32), intr_inds
+
+    if intrinsics_path.endswith(".txt"):
+        intr_rows = np.loadtxt(intrinsics_path, dtype=np.float64)
+        intr_rows = np.atleast_2d(intr_rows)
+        if intr_rows.shape[1] == 9:
+            fx = intr_rows[:, 0]
+            fy = intr_rows[:, 4]
+            cx = intr_rows[:, 2]
+            cy = intr_rows[:, 5]
+            intr_data = np.stack([fx, fy, cx, cy], axis=1)
+        elif intr_rows.shape[1] == 4:
+            intr_data = intr_rows
+        else:
+            raise AssertionError(
+                "Expected intrinsics text rows with either 4 values "
+                "'fx fy cx cy' or 9 flattened K values, got shape "
+                f"{intr_rows.shape}"
+            )
+        intr_inds = np.arange(len(intr_data), dtype=np.int64)
+        return intr_data.astype(np.float32), intr_inds
+
+    raise ValueError(f"Unsupported VIPE intrinsics prior file: {intrinsics_path}")
 
 
 def _convert_camera_pose_convention(T_wc_list, camera_convention):
@@ -42,19 +112,9 @@ def load_vipe_camera_priors(
     intrinsics_tol=1e-4,
     camera_convention="opencv",
 ):
-    pose_data, pose_inds = _load_npz_data_and_inds(pose_npz_path)
-    intr_data, intr_inds = _load_npz_data_and_inds(intrinsics_npz_path)
+    pose_data, pose_inds = _load_pose_data_and_inds(pose_npz_path)
+    intr_data, intr_inds = _load_intrinsics_data_and_inds(intrinsics_npz_path)
 
-    pose_data, pose_inds = _sort_by_inds(pose_data, pose_inds)
-    intr_data, intr_inds = _sort_by_inds(intr_data, intr_inds)
-
-    assert pose_data.ndim == 3 and pose_data.shape[1:] == (
-        4,
-        4,
-    ), f"Expected pose data shape (T,4,4), got {pose_data.shape}"
-    assert (
-        intr_data.ndim == 2 and intr_data.shape[1] == 4
-    ), f"Expected intrinsics data shape (T,4), got {intr_data.shape}"
     assert len(pose_data) == len(
         intr_data
     ), f"Pose/intrinsics length mismatch: {len(pose_data)} vs {len(intr_data)}"
@@ -106,11 +166,7 @@ def load_vipe_camera_priors(
 
 
 def load_vipe_intrinsics_K(intrinsics_npz_path):
-    intr_data, intr_inds = _load_npz_data_and_inds(intrinsics_npz_path)
-    intr_data, _ = _sort_by_inds(intr_data, intr_inds)
-    assert (
-        intr_data.ndim == 2 and intr_data.shape[1] == 4
-    ), f"Expected intrinsics data shape (T,4), got {intr_data.shape}"
+    intr_data, _ = _load_intrinsics_data_and_inds(intrinsics_npz_path)
     fx, fy, cx, cy = intr_data[0].tolist()
     K = np.eye(3, dtype=np.float32)
     K[0, 0] = fx

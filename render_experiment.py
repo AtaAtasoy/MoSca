@@ -1,7 +1,9 @@
 import argparse
+import json
 import logging
 import os
 import os.path as osp
+import shlex
 import shutil
 import subprocess
 
@@ -10,14 +12,15 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from data_utils.iphone_helpers import load_iphone_gt_poses
 from data_utils.known_camera_helpers import load_vipe_camera_priors
-from data_utils.nvidia_helpers import get_nvidia_dummy_test
-from eval_utils.campose_alignment import align_ate_c2b_use_a2b
 from lib_moca.camera import MonocularCameras
 from lib_mosca.dynamic_gs import DynSCFGaussian
 from lib_mosca.static_gs import StaticGaussian
 from lib_render.render_helper import GS_BACKEND, render
+
+"""
+It's dumb but MoSca codebase uses "wc" for cam2world (world coordinates) as the naming.
+"""
 
 
 def configure_logging():
@@ -30,16 +33,10 @@ def parse_args():
     parser = argparse.ArgumentParser("Render a finished MoSca experiment")
     parser.add_argument("--logdir", type=str, required=True, help="Finished run dir")
     parser.add_argument(
-        "--ws",
-        type=str,
-        default=None,
-        help="Workspace root. Required for dataset-specific test cameras",
-    )
-    parser.add_argument(
         "--cfg",
         type=str,
         default=None,
-        help="Config used for training. Required for test-camera rendering",
+        help="Config used for training. Optional; used to visualize the input training cameras.",
     )
     parser.add_argument(
         "--savedir",
@@ -81,38 +78,73 @@ def parse_args():
         "--test_camera_pose_path",
         type=str,
         default=None,
-        help="Optional .npz test-camera pose file with VIPE-style data/inds layout",
+        help="Optional VIPE-style test-camera pose file (.npz or scene-style .txt)",
     )
     parser.add_argument(
         "--test_camera_intrinsics_path",
         type=str,
         default=None,
-        help="Optional .npz test-camera intrinsics file with VIPE-style data/inds layout",
+        help="Optional VIPE-style test-camera intrinsics file (.npz or scene-style .txt)",
     )
     parser.add_argument(
         "--test_camera_convention",
         type=str,
         default="opencv",
         choices=["opengl", "opencv"],
-        help="Camera-axis convention of explicit test-camera .npz poses",
+        help="Camera-axis convention of explicit test-camera poses",
     )
     parser.add_argument(
         "--test_camera_name",
         type=str,
         default="test_npz",
-        help="Sequence name used when rendering explicit test-camera .npz inputs",
+        help="Sequence name used when rendering explicit test-camera inputs",
     )
     parser.add_argument(
         "--test_height",
         type=int,
         default=None,
-        help="Optional render height for explicit test-camera .npz inputs. Defaults to training height",
+        help="Optional render height for explicit test-camera inputs. Defaults to training height",
     )
     parser.add_argument(
         "--test_width",
         type=int,
         default=None,
-        help="Optional render width for explicit test-camera .npz inputs. Defaults to training width",
+        help="Optional render width for explicit test-camera inputs. Defaults to training width",
+    )
+    parser.add_argument(
+        "--test_camera_normalization_params",
+        type=str,
+        default=None,
+        help="Optional VIPE normalization_params.json used to transform explicit test-camera poses",
+    )
+    parser.add_argument(
+        "--test_camera_normalization_mode",
+        type=str,
+        default=None,
+        choices=["normalized_to_raw", "raw_to_normalized"],
+        help="How to transform explicit test-camera poses with normalization_params.json",
+    )
+    parser.add_argument(
+        "--show-cameras",
+        action="store_true",
+        help="Visualize camera sets with the same viewer used by mosca_reconstruct --show-cameras",
+    )
+    parser.add_argument(
+        "--show-cameras-only",
+        action="store_true",
+        help="Open/save the camera visualization and skip RGB rendering",
+    )
+    parser.add_argument(
+        "--camera-screenshot",
+        type=str,
+        default=None,
+        help="Optional screenshot path for camera visualization. If set, runs the camera viewer off-screen",
+    )
+    parser.add_argument(
+        "--camera-scale",
+        type=float,
+        default=0.15,
+        help="Relative camera-frustum scale passed to the shared camera viewer",
     )
     return parser.parse_args()
 
@@ -123,10 +155,35 @@ def load_cfg(cfg_path):
     return cfg
 
 
-def get_known_camera_convention(cfg):
-    if cfg is None:
-        return "opencv"
-    return getattr(cfg, "known_camera_convention", "opencv")
+def _read_fit_commandline_args(logdir):
+    args_path = osp.join(logdir, "fit_commandline_args.txt")
+    if not osp.exists(args_path):
+        return []
+    with open(args_path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    if len(content) == 0:
+        return []
+    return shlex.split(content)
+
+
+def _extract_cli_flag(tokens, flag):
+    for i, token in enumerate(tokens):
+        if token == flag and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if token.startswith(flag + "="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def infer_cfg_from_logdir(logdir):
+    tokens = _read_fit_commandline_args(logdir)
+    return _extract_cli_flag(tokens, "--cfg")
+
+
+def resolve_cfg_path(args):
+    if args.cfg is not None:
+        return args.cfg
+    return infer_cfg_from_logdir(args.logdir)
 
 
 def load_experiment(logdir, device):
@@ -178,6 +235,95 @@ def build_intrinsics_from_K(K_src, device):
     K = torch.as_tensor(K_src, dtype=torch.float32, device=device).clone()
     assert K.shape == (3, 3), f"Expected K shape (3,3), got {tuple(K.shape)}"
     return K
+
+
+def validate_test_camera_normalization_args(args):
+    if (
+        args.test_camera_normalization_mode is not None
+        and args.test_camera_normalization_params is None
+    ):
+        raise ValueError(
+            "--test_camera_normalization_mode requires --test_camera_normalization_params"
+        )
+    if (
+        args.test_camera_normalization_params is not None
+        and args.test_camera_normalization_mode is None
+    ):
+        raise ValueError(
+            "--test_camera_normalization_params requires --test_camera_normalization_mode"
+        )
+
+
+def load_test_camera_normalization_params(json_path, device):
+    if not osp.exists(json_path):
+        raise FileNotFoundError(
+            f"Normalization params file not found: {json_path}"
+        )
+    with open(json_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Expected normalization params JSON object, got {type(payload).__name__}"
+        )
+    if "center" not in payload or "scale" not in payload:
+        raise ValueError(
+            "Normalization params must contain 'center' and 'scale' keys"
+        )
+
+    center = torch.as_tensor(payload["center"], dtype=torch.float64, device=device)
+    if center.shape != (3,):
+        raise ValueError(
+            f"Expected normalization center shape (3,), got {tuple(center.shape)}"
+        )
+
+    scale = float(payload["scale"])
+    if scale <= 0.0:
+        raise ValueError(f"Normalization scale must be positive, got {scale}")
+
+    return {"center": center, "scale": scale}
+
+
+def transform_test_camera_T_wc_list(T_wc, normalization_params, mode):
+    if mode not in ["normalized_to_raw", "raw_to_normalized"]:
+        raise ValueError(f"Unsupported normalization mode: {mode}")
+
+    T_wc = torch.as_tensor(T_wc, dtype=torch.float64).clone()
+    assert T_wc.ndim == 3 and T_wc.shape[1:] == (
+        4,
+        4,
+    ), f"Expected T_wc shape (T,4,4), got {tuple(T_wc.shape)}"
+
+    center = normalization_params["center"].to(T_wc.device)
+    scale = float(normalization_params["scale"])
+    t_wc = T_wc[:, :3, 3]
+
+    if mode == "normalized_to_raw":
+        T_wc[:, :3, 3] = t_wc / scale + center[None]
+    else:
+        T_wc[:, :3, 3] = scale * (t_wc - center[None])
+    T_wc[:, 3, :] = 0.0
+    T_wc[:, 3, 3] = 1.0
+    return T_wc
+
+
+def convert_T_wc_to_T_cw(T_wc, device, dtype=torch.float32):
+    T_wc = torch.as_tensor(T_wc, dtype=torch.float64).clone()
+    assert T_wc.ndim == 3 and T_wc.shape[1:] == (
+        4,
+        4,
+    ), f"Expected T_wc shape (T,4,4), got {tuple(T_wc.shape)}"
+
+    R_wc = T_wc[:, :3, :3]
+    t_wc = T_wc[:, :3, 3]
+    R_cw = R_wc.transpose(1, 2)
+    t_cw = -torch.einsum("tij,tj->ti", R_cw, t_wc)
+
+    T_cw = torch.eye(4, dtype=torch.float64, device=T_wc.device)[None].repeat(
+        len(T_wc), 1, 1
+    )
+    T_cw[:, :3, :3] = R_cw
+    T_cw[:, :3, 3] = t_cw
+    return T_cw.to(device=device, dtype=dtype)
 
 
 def get_render_payload(region, s_model, d_model, tid):
@@ -263,7 +409,7 @@ def render_sequence(
     H,
     W,
     K,
-    T_cw_list,
+    T_wc_list,
     model_tids,
     s_model,
     d_model,
@@ -276,6 +422,7 @@ def render_sequence(
     frame_dir = osp.join(save_root, "frames")
     os.makedirs(frame_dir, exist_ok=True)
 
+    T_cw_list = convert_T_wc_to_T_cw(T_wc_list, device=K.device, dtype=K.dtype)
     for frame_idx, (T_cw, model_tid) in enumerate(zip(T_cw_list, model_tids)):
         render_dict = render(
             get_render_payload(region, s_model, d_model, int(model_tid)),
@@ -296,7 +443,7 @@ def get_train_sequence(cams):
     H = int(cams.default_H)
     W = int(cams.default_W)
     K = cams.K(H, W)
-    T_cw_list = [cams.T_cw(t).detach() for t in range(cams.T)]
+    T_wc_list = cams.T_wc_list().detach()
     model_tids = list(range(cams.T))
     return [
         {
@@ -304,13 +451,44 @@ def get_train_sequence(cams):
             "H": H,
             "W": W,
             "K": K,
-            "T_cw_list": T_cw_list,
+            "T_wc_list": T_wc_list,
             "model_tids": model_tids,
         }
     ]
 
 
-def get_explicit_test_npz_sequences(args, device):
+def get_initial_training_camera_set(cfg, cams):
+    if cfg is None:
+        return None
+
+    known_camera_mode = getattr(cfg, "known_camera_mode", None)
+    if known_camera_mode not in ["init", "fixed"]:
+        return None
+
+    known_camera_format = getattr(cfg, "known_camera_format", "vipe")
+    if known_camera_format != "vipe":
+        return None
+
+    pose_path = getattr(cfg, "known_camera_pose_path", None)
+    intr_path = getattr(cfg, "known_camera_intrinsics_path", None)
+    if pose_path is None or intr_path is None:
+        return None
+
+    priors = load_vipe_camera_priors(
+        pose_npz_path=pose_path,
+        intrinsics_npz_path=intr_path,
+        expected_T=int(cams.T),
+        camera_convention=getattr(cfg, "known_camera_convention", "opencv"),
+    )
+    return {
+        "name": "input training cameras",
+        "T_wc": priors["T_wc"].detach().cpu().numpy(),
+        "K": priors["K"].detach().cpu().numpy(),
+        "color": "yellow",
+    }
+
+
+def get_test_sequences(args, device):
     if args.test_camera_pose_path is None or args.test_camera_intrinsics_path is None:
         return []
 
@@ -320,144 +498,101 @@ def get_explicit_test_npz_sequences(args, device):
         expected_T=None,
         camera_convention=getattr(args, "test_camera_convention", "opencv"),
     )
+    test_T_wc = test_priors["T_wc"] # cam2world
+    if args.test_camera_normalization_params is not None:
+        normalization_params = load_test_camera_normalization_params(
+            args.test_camera_normalization_params, device=test_T_wc.device
+        )
+        test_T_wc = transform_test_camera_T_wc_list(
+            test_T_wc,
+            normalization_params=normalization_params,
+            mode=args.test_camera_normalization_mode,
+        )
     test_inds = test_priors["inds"].detach().cpu().numpy().tolist()
 
     K = build_intrinsics_from_K(test_priors["K"], device=device)
-    H, W = int(K[1, 2].item() * 2), int(K[0, 2].item() * 2) # infer H,W from cy,cx in K assuming cxcy_ratio=0.5
-    test_cw_list = [test_priors["T_wc"][i].to(device) for i in range(len(test_priors["inds"]))] # cam2world, opencv coming from .npz
+    if args.test_height is not None and args.test_width is not None:
+        H, W = int(args.test_height), int(args.test_width)
+    else:
+        # Infer H,W from the principal point under the common cx=W/2, cy=H/2 convention.
+        H, W = int(K[1, 2].item() * 2), int(K[0, 2].item() * 2)
     return [
         {
             "name": args.test_camera_name,
             "H": H,
             "W": W,
             "K": K,
-            "T_cw_list": test_cw_list,
+            "T_wc_list": test_T_wc.to(device),
             "model_tids": [int(t) for t in test_inds],
         }
     ]
 
 
-def get_test_sequences(args, cfg, ws, cams, device):
-    explicit_sequences = get_explicit_test_npz_sequences(args, device)
-    if len(explicit_sequences) > 0:
-        return explicit_sequences
+def get_test_camera_sets_for_visualization(args, cfg, cams, device):
+    camera_sets = []
 
-    if cfg is None:
-        raise ValueError(
-            "--cfg is required for dataset-based test-camera rendering, or pass explicit --test_camera_pose_path and --test_camera_intrinsics_path"
+    explicit_sequences = get_test_sequences(args, device)
+    for seq in explicit_sequences:
+        camera_sets.append(
+            {
+                "name": seq["name"],
+                "T_wc": seq["T_wc_list"].detach().cpu().numpy(),
+                "K": seq["K"].detach().cpu().numpy(),
+                "color": "red",
+            }
         )
-    if ws is None:
-        raise ValueError("--ws is required for dataset-based test-camera rendering")
+    return camera_sets
 
-    dataset_mode = getattr(cfg, "mode", "iphone")
-    solved_train_T_wi = cams.T_wc_list().detach().cpu()
-    sequences = []
 
-    if dataset_mode == "iphone":
-        (
-            gt_training_cam_T_wi,
-            gt_testing_cam_T_wi_list,
-            gt_testing_tids_list,
-            _gt_testing_fns_list,
-            _gt_training_fov,
-            gt_testing_fov_list,
-            _gt_training_cxcy_ratio,
-            gt_testing_cxcy_ratio_list,
-        ) = load_iphone_gt_poses(ws, getattr(cfg, "t_subsample", 1))
+def maybe_visualize_render_cameras(args, cfg, cams, device):
+    if not args.show_cameras:
+        return
 
-        test_image_dir = osp.join(ws, "test_images")
-        sample_fn = sorted(
-            [
-                f
-                for f in os.listdir(test_image_dir)
-                if f.endswith(".png") or f.endswith(".jpg")
-            ]
-        )[0]
-        sample = imageio.imread(osp.join(test_image_dir, sample_fn))
-        H, W = sample.shape[:2]
+    try:
+        from visualize_mosca_cameras import visualize_camera_sets
+    except ImportError as exc:
+        raise ImportError(
+            "Camera visualization uses the same viewer as mosca_reconstruct --show-cameras, "
+            "which requires visualize_mosca_cameras.py dependencies (notably pyvista and dreifus)."
+        ) from exc
 
-        for cam_idx, test_cam_T_wi in enumerate(gt_testing_cam_T_wi_list):
-            aligned_test_T_wi = align_ate_c2b_use_a2b(
-                traj_a=gt_training_cam_T_wi,
-                traj_b=solved_train_T_wi,
-                traj_c=test_cam_T_wi,
-            )
-            T_cw_list = [
-                torch.linalg.inv(aligned_test_T_wi[i]).to(device)
-                for i in range(len(aligned_test_T_wi))
-            ]
-            focal = 1.0 / np.tan(np.deg2rad(gt_testing_fov_list[cam_idx]) / 2.0)
-            K = build_intrinsics_from_focal(
-                H=H,
-                W=W,
-                focal=focal,
-                cxcy_ratio=gt_testing_cxcy_ratio_list[cam_idx],
-                device=device,
-            )
-            sequences.append(
-                {
-                    "name": f"test_cam{cam_idx}",
-                    "H": H,
-                    "W": W,
-                    "K": K,
-                    "T_cw_list": T_cw_list,
-                    "model_tids": [int(t) for t in gt_testing_tids_list[cam_idx]],
-                }
-            )
-
-    elif dataset_mode == "nvidia":
-        gt_training_cam_T_wi = solved_train_T_wi
-        gt_training_fov = cams.fov
-        (
-            gt_testing_cam_T_wi_list,
-            gt_testing_tids_list,
-            _gt_testing_fns_list,
-            gt_testing_fov_list,
-            gt_testing_cxcy_ratio_list,
-        ) = get_nvidia_dummy_test(gt_training_cam_T_wi, gt_training_fov)
-
-        H = int(cams.default_H)
-        W = int(cams.default_W)
-        for cam_idx, test_cam_T_wi in enumerate(gt_testing_cam_T_wi_list):
-            aligned_test_T_wi = align_ate_c2b_use_a2b(
-                traj_a=gt_training_cam_T_wi,
-                traj_b=solved_train_T_wi,
-                traj_c=test_cam_T_wi,
-            )
-            T_cw_list = [
-                torch.linalg.inv(aligned_test_T_wi[i]).to(device)
-                for i in range(len(aligned_test_T_wi))
-            ]
-            focal = 1.0 / np.tan(np.deg2rad(float(gt_testing_fov_list[cam_idx])) / 2.0)
-            K = build_intrinsics_from_focal(
-                H=H,
-                W=W,
-                focal=focal,
-                cxcy_ratio=gt_testing_cxcy_ratio_list[cam_idx],
-                device=device,
-            )
-            sequences.append(
-                {
-                    "name": f"test_cam{cam_idx}",
-                    "H": H,
-                    "W": W,
-                    "K": K,
-                    "T_cw_list": T_cw_list,
-                    "model_tids": [int(t) for t in gt_testing_tids_list[cam_idx]],
-                }
-            )
+    camera_sets = []
+    train_camera_set = get_initial_training_camera_set(cfg, cams)
+    if train_camera_set is not None:
+        camera_sets.append(train_camera_set)
     else:
-        raise ValueError(
-            f"Test-camera rendering is only implemented for iphone/nvidia unless explicit .npz camera files are provided, got mode={dataset_mode}"
-        )
+        logging.warning("Could not determine initial training cameras from cfg")
 
-    return sequences
+    if args.camera_set in ["test", "both"]:
+        camera_sets.extend(get_test_camera_sets_for_visualization(args, cfg, cams, device))
+
+    if len(camera_sets) == 0:
+        logging.warning("No camera sets available to visualize")
+        return
+
+    logging.info(
+        "Showing render camera visualization. Close the window to continue."
+    )
+    visualize_camera_sets(
+        camera_sets=camera_sets,
+        stride=1,
+        camera_scale=args.camera_scale,
+        screenshot=args.camera_screenshot,
+        title_lines=[
+            "MoSca Cameras",
+            "OpenCV camera convention; saved poses are T_wc (cam->world)",
+            "yellow: initial training cameras",
+            "red: render_experiment test cameras",
+        ],
+    )
 
 
 def main():
     configure_logging()
     args = parse_args()
+    validate_test_camera_normalization_args(args)
     device = torch.device(args.device)
+    cfg_path = resolve_cfg_path(args)
 
     if args.savedir is None:
         savedir = osp.join(args.logdir, "renders")
@@ -468,16 +603,21 @@ def main():
     cams, s_model, d_model = load_experiment(args.logdir, device)
 
     cfg = None
-    if args.camera_set in ["test", "both"]:
-        if args.cfg is not None:
-            cfg = load_cfg(args.cfg)
+    if args.camera_set in ["test", "both"] or args.show_cameras:
+        if cfg_path is not None:
+            cfg = load_cfg(cfg_path)
         elif (
             args.test_camera_pose_path is None
             or args.test_camera_intrinsics_path is None
         ):
             raise ValueError(
-                "--cfg is required when rendering dataset test cameras unless explicit test .npz files are provided"
+                "--cfg is required unless explicit test-camera pose and intrinsics inputs are provided"
             )
+
+    maybe_visualize_render_cameras(args, cfg, cams, device)
+    if args.show_cameras_only:
+        logging.info("Finished camera visualization only.")
+        return
 
     if args.camera_set in ["train", "both"]:
         for seq in get_train_sequence(cams):
@@ -489,7 +629,7 @@ def main():
                 H=seq["H"],
                 W=seq["W"],
                 K=seq["K"],
-                T_cw_list=seq["T_cw_list"],
+                T_wc_list=seq["T_wc_list"],
                 model_tids=seq["model_tids"],
                 s_model=s_model,
                 d_model=d_model,
@@ -500,7 +640,7 @@ def main():
             )
 
     if args.camera_set in ["test", "both"]:
-        for seq in get_test_sequences(args, cfg, args.ws, cams, device):
+        for seq in get_test_sequences(args, device):
             seq_root = osp.join(savedir, args.region, seq["name"])
             logging.info("Rendering %s to %s", seq["name"], seq_root)
             render_sequence(
@@ -509,7 +649,7 @@ def main():
                 H=seq["H"],
                 W=seq["W"],
                 K=seq["K"],
-                T_cw_list=seq["T_cw_list"],
+                T_wc_list=seq["T_wc_list"],
                 model_tids=seq["model_tids"],
                 s_model=s_model,
                 d_model=d_model,

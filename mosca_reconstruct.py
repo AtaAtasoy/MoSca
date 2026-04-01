@@ -32,6 +32,8 @@ from recon_utils import (
     seed_everything,
     setup_recon_ws,
     auto_get_depth_dir_tap_mode,
+    log_geometry_policy,
+    maybe_rescale_world_threshold,
     update_s2d_track_identification,
     viz_mosca_curves_before_optim,
     set_epi_mask_to_s2d_for_bg_render,
@@ -62,10 +64,15 @@ def get_static_render_error_mask(s2d, log_path, render_error_th, open_ksize=-1):
 
 def photometric_warmup(ws, log_path, fit_cfg):
     seed_everything(SEED)
+    policy = log_geometry_policy(fit_cfg, prefix="Photometric warmup geometry policy")
     # ! here the warup do not need to start from low opa, only when mix two component we start from low opa!
     DEPTH_DIR, TAP_MODE = auto_get_depth_dir_tap_mode(ws, fit_cfg)
     DEPTH_BOUNDARY_TH = getattr(fit_cfg, "depth_boundary_th", 1.0)
-    DEP_MEDIAN = getattr(fit_cfg, "dep_median", 1.0)
+    DEP_MEDIAN = (
+        getattr(fit_cfg, "dep_median", 1.0)
+        if policy["apply_depth_normalization"]
+        else -1.0
+    )
     EPI_TH = getattr(fit_cfg, "photo_warm_epi_th", getattr(fit_cfg, "epi_th", 1e-3))
     PHOTO_STATIC_WARM_STEPS = getattr(fit_cfg, "photo_static_warm_steps", -1)
     if PHOTO_STATIC_WARM_STEPS < 0:
@@ -80,17 +87,21 @@ def photometric_warmup(ws, log_path, fit_cfg):
         Saved2D(ws)
         .load_epi()
         .load_dep(DEPTH_DIR, DEPTH_BOUNDARY_TH)
-        .normalize_depth(median_depth=DEP_MEDIAN)
+        .normalize_depth(
+            median_depth=DEP_MEDIAN,
+            apply_scale=policy["apply_depth_normalization"],
+        )
         .recompute_dep_mask(depth_boundary_th=DEPTH_BOUNDARY_TH)
         .load_track(
             TAP_MODE, min_valid_cnt=getattr(fit_cfg, "tap_loading_min_valid_cnt", 4)
         )
-        .rescale_perframe_depth_from_bundle(
-            bundle_pth_fn=osp.join(log_path, "bundle", "bundle.pth")
-        )
         .load_vos()
         .to(device)
     )
+    if policy["replay_bundle_depth"]:
+        s2d = s2d.rescale_perframe_depth_from_bundle(
+            bundle_pth_fn=osp.join(log_path, "bundle", "bundle.pth")
+        )
     s2d = set_epi_mask_to_s2d_for_bg_render(s2d, EPI_TH, device)
     cams: MonocularCameras = MonocularCameras.load_from_ckpt(
         torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"))
@@ -121,7 +132,11 @@ def photometric_warmup(ws, log_path, fit_cfg):
         phase_name="static_warm",
         s2d=s2d,
         total_steps=PHOTO_STATIC_WARM_STEPS,
-        optim_cam_after_steps=getattr(fit_cfg, "photo_warm_optim_cam_after_steps", 0),
+        optim_cam_after_steps=(
+            getattr(fit_cfg, "photo_warm_optim_cam_after_steps", 0)
+            if not policy["freeze_camera_geometry"]
+            else PHOTO_STATIC_WARM_STEPS + 1
+        ),
         decay_start=getattr(fit_cfg, "photo_warm_decay_start", 2000),
         cams=cams,
         s_model=s_model,
@@ -135,8 +150,8 @@ def photometric_warmup(ws, log_path, fit_cfg):
         lambda_distortion=getattr(fit_cfg, "photo_warm_lambda_distortion", 100.0),
         optimizer_cfg=OptimCFG(
             lr_cam_f=0.0,
-            lr_cam_q=0.00003,
-            lr_cam_t=0.00003,
+            lr_cam_q=0.00003 if not policy["freeze_camera_geometry"] else 0.0,
+            lr_cam_t=0.00003 if not policy["freeze_camera_geometry"] else 0.0,
             # gs
             lr_p=getattr(fit_cfg, "photo_warm_lr_p", 0.00016),
             lr_q=getattr(fit_cfg, "photo_warm_lr_q", 0.001),
@@ -207,13 +222,18 @@ def photometric_warmup(ws, log_path, fit_cfg):
 
 def scaffold_reconstruct(ws, log_path, fit_cfg):
     seed_everything(SEED)
+    policy = log_geometry_policy(fit_cfg, prefix="Scaffold reconstruct geometry policy")
     DEPTH_DIR, TAP_MODE = auto_get_depth_dir_tap_mode(ws, fit_cfg)
     DEPTH_BOUNDARY_TH = getattr(fit_cfg, "depth_boundary_th", 1.0)
 
     EPI_TH = getattr(fit_cfg, "epi_th", 1e-3)
     DYN_ID_CNT = getattr(fit_cfg, "dyn_id_cnt", 2 * 4)
     SCF_GEO_KEYFRAME_RATE = getattr(fit_cfg, "scf_geo_keyframe_rate", 4)
-    DEP_MEDIAN = getattr(fit_cfg, "dep_median", 1.0)
+    DEP_MEDIAN = (
+        getattr(fit_cfg, "dep_median", 1.0)
+        if policy["apply_depth_normalization"]
+        else -1.0
+    )
     device = torch.device("cuda:0")
 
     # load solved camera and s2d and rescale
@@ -221,17 +241,21 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         Saved2D(ws)
         .load_epi()
         .load_dep(DEPTH_DIR, DEPTH_BOUNDARY_TH)
-        .normalize_depth(median_depth=DEP_MEDIAN)
+        .normalize_depth(
+            median_depth=DEP_MEDIAN,
+            apply_scale=policy["apply_depth_normalization"],
+        )
         .recompute_dep_mask(depth_boundary_th=DEPTH_BOUNDARY_TH)
         .load_track(
             TAP_MODE, min_valid_cnt=getattr(fit_cfg, "tap_loading_min_valid_cnt", 4)
         )
-        .rescale_perframe_depth_from_bundle(
-            bundle_pth_fn=osp.join(log_path, "bundle", "bundle.pth")
-        )
         .load_vos()
         .to(device)
     )
+    if policy["replay_bundle_depth"]:
+        s2d = s2d.rescale_perframe_depth_from_bundle(
+            bundle_pth_fn=osp.join(log_path, "bundle", "bundle.pth")
+        )
 
     # re-identify the static and dynamic regions
     consider_photo_error_dyn_id_th = getattr(
@@ -287,19 +311,26 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         if getattr(fit_cfg, "get_dynamic_curves_filter_factor_in_world", True)
         else 1.0
     )
+    shaking_th = maybe_rescale_world_threshold(
+        getattr(fit_cfg, "get_curve_refilter_shaking_th_world", 0.15),
+        s2d,
+        fit_cfg,
+        name="get_curve_refilter_shaking_th_world",
+    )
+    spatracker_consistency_th = maybe_rescale_world_threshold(
+        getattr(fit_cfg, "get_curve_refilter_spatracker_consistency_th_world", 0.15),
+        s2d,
+        fit_cfg,
+        name="get_curve_refilter_spatracker_consistency_th_world",
+    )
     curve_xyz, curve_mask, curve_rgb, curve_filter_mask = get_dynamic_curves(
         s2d,
         cams,
         t_list=sub_t_list,
         refilter_2d_track_flag=True,
         refilter_min_valid_cnt=DYN_ID_CNT,
-        refilter_shaking_th=getattr(
-            fit_cfg, "get_curve_refilter_shaking_th_world", 0.15
-        )
-        * get_dynamic_curves_filter_factor,
-        refilter_spatracker_consistency_th=getattr(
-            fit_cfg, "get_curve_refilter_spatracker_consistency_th_world", 0.15
-        )
+        refilter_shaking_th=shaking_th * get_dynamic_curves_filter_factor,
+        refilter_spatracker_consistency_th=spatracker_consistency_th
         * get_dynamic_curves_filter_factor,
         refilter_remove_shaking_curve=getattr(
             fit_cfg, "get_curve_refilter_remove_shaking_curve", True
@@ -354,8 +385,11 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         node_certain=curve_mask,
         t_list=sub_t_list,
         spatial_unit_factor=getattr(fit_cfg, "mosca_unit_auto_factor", 1.0),
-        spatial_unit_hard_set=getattr(
-            fit_cfg, "mosca_unit_world", 0.02 * s2d.scale_nw
+        spatial_unit_hard_set=maybe_rescale_world_threshold(
+            getattr(fit_cfg, "mosca_unit_world", 0.02 * s2d.scale_nw),
+            s2d,
+            fit_cfg,
+            name="mosca_unit_world",
         ),  # ! SET NEGATIVE IF WANT TO USE AUTO
         sigma_init_ratio=getattr(fit_cfg, "mosca_sigma_init_ratio", 5.0),
         sigma_max_ratio=getattr(fit_cfg, "mosca_sigma_max_ratio", 10.0),
@@ -456,9 +490,16 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
 
 def photometric_reconstruct(ws, log_path, fit_cfg):
     seed_everything(SEED)
+    policy = log_geometry_policy(
+        fit_cfg, prefix="Photometric reconstruct geometry policy"
+    )
     DEPTH_DIR, TAP_MODE = auto_get_depth_dir_tap_mode(ws, fit_cfg)
     DEPTH_BOUNDARY_TH = getattr(fit_cfg, "depth_boundary_th", 1.0)
-    DEP_MEDIAN = getattr(fit_cfg, "dep_median", 1.0)
+    DEP_MEDIAN = (
+        getattr(fit_cfg, "dep_median", 1.0)
+        if policy["apply_depth_normalization"]
+        else -1.0
+    )
 
     EPI_TH = getattr(fit_cfg, "epi_th", 1e-3)
     DYN_ID_CNT = getattr(fit_cfg, "dyn_id_cnt", 2 * 4)
@@ -475,18 +516,22 @@ def photometric_reconstruct(ws, log_path, fit_cfg):
         Saved2D(ws)
         .load_epi()
         .load_dep(DEPTH_DIR, DEPTH_BOUNDARY_TH)
-        .normalize_depth(median_depth=DEP_MEDIAN)
+        .normalize_depth(
+            median_depth=DEP_MEDIAN,
+            apply_scale=policy["apply_depth_normalization"],
+        )
         .recompute_dep_mask(depth_boundary_th=DEPTH_BOUNDARY_TH)
         .load_track(
             TAP_MODE, min_valid_cnt=getattr(fit_cfg, "tap_loading_min_valid_cnt", 4)
-        )
-        .rescale_perframe_depth_from_bundle(
-            bundle_pth_fn=osp.join(log_path, "bundle", "bundle.pth")
         )
         .load_vos()
         .load_flow()
         .to(device)
     )
+    if policy["replay_bundle_depth"]:
+        s2d = s2d.rescale_perframe_depth_from_bundle(
+            bundle_pth_fn=osp.join(log_path, "bundle", "bundle.pth")
+        )
     track_identification = np.load(osp.join(log_path, "track_identification.npz"))
     s2d.register_track_indentification(
         torch.from_numpy(track_identification["static_track_mask"]).to(device),
@@ -597,7 +642,11 @@ def photometric_reconstruct(ws, log_path, fit_cfg):
     photo_solver.photometric_fit(
         s2d=s2d,
         total_steps=getattr(fit_cfg, "photo_total_steps", 6000),
-        optim_cam_after_steps=getattr(fit_cfg, "photo_optim_cam_after_steps", 0),
+        optim_cam_after_steps=(
+            getattr(fit_cfg, "photo_optim_cam_after_steps", 0)
+            if not policy["freeze_camera_geometry"]
+            else getattr(fit_cfg, "photo_total_steps", 6000) + 1
+        ),
         decay_start=getattr(fit_cfg, "photo_decay_start", 2000),
         skinning_corr_start_steps=getattr(
             fit_cfg, "photo_skinning_corr_start_steps", 10000000000
@@ -638,8 +687,8 @@ def photometric_reconstruct(ws, log_path, fit_cfg):
         geo_reg_start_steps=getattr(fit_cfg, "photo_geo_reg_start_steps", 0),
         optimizer_cfg=OptimCFG(
             lr_cam_f=0.0,
-            lr_cam_q=0.00003,
-            lr_cam_t=0.00003,
+            lr_cam_q=0.00003 if not policy["freeze_camera_geometry"] else 0.0,
+            lr_cam_t=0.00003 if not policy["freeze_camera_geometry"] else 0.0,
             # gs
             lr_p=getattr(fit_cfg, "photo_lr_p", 0.00016),
             lr_q=getattr(fit_cfg, "photo_lr_q", 0.001),

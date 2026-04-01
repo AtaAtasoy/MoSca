@@ -15,6 +15,7 @@ from recon_utils import (
     seed_everything,
     setup_recon_ws,
     auto_get_depth_dir_tap_mode,
+    log_geometry_policy,
     SEED,
 )
 
@@ -58,6 +59,7 @@ def load_known_camera_init(ws, fit_cfg, s2d):
         return None
     assert known_camera_mode in [
         "init",
+        "fixed",
     ], f"Unsupported known_camera_mode={known_camera_mode}"
 
     known_camera_format = getattr(fit_cfg, "known_camera_format", "vipe")
@@ -92,9 +94,9 @@ def maybe_visualize_initial_cameras(ws, fit_cfg):
     if known_camera_mode is None:
         logging.warning("`--show-cameras` requested, but no known camera mode is configured")
         return
-    if known_camera_mode != "init":
+    if known_camera_mode not in ["init", "fixed"]:
         logging.warning(
-            "`--show-cameras` currently only supports known_camera_mode=init, got %s",
+            "`--show-cameras` currently only supports known_camera_mode in [init, fixed], got %s",
             known_camera_mode,
         )
         return
@@ -143,10 +145,15 @@ def maybe_visualize_initial_cameras(ws, fit_cfg):
 
 def static_reconstruct(ws, log_path, fit_cfg):
     seed_everything(SEED)
+    policy = log_geometry_policy(fit_cfg, prefix="Static reconstruct geometry policy")
     DEPTH_DIR, TAP_MODE = auto_get_depth_dir_tap_mode(ws, fit_cfg)
     DEPTH_BOUNDARY_TH = getattr(fit_cfg, "depth_boundary_th", 1.0)
     INIT_GT_CAMERA_FLAG = getattr(fit_cfg, "init_gt_camera", False)
-    DEP_MEDIAN = getattr(fit_cfg, "dep_median", 1.0)
+    DEP_MEDIAN = (
+        getattr(fit_cfg, "dep_median", 1.0)
+        if policy["apply_depth_normalization"]
+        else -1.0
+    )
 
     EPI_TH = getattr(fit_cfg, "ba_epi_th", getattr(fit_cfg, "epi_th", 1e-3))
     logging.info(f"Static BA with EPI_TH={EPI_TH}")
@@ -157,7 +164,10 @@ def static_reconstruct(ws, log_path, fit_cfg):
         Saved2D(ws)
         .load_epi()
         .load_dep(DEPTH_DIR, DEPTH_BOUNDARY_TH)
-        .normalize_depth(median_depth=DEP_MEDIAN)
+        .normalize_depth(
+            median_depth=DEP_MEDIAN,
+            apply_scale=policy["apply_depth_normalization"],
+        )
         .recompute_dep_mask(depth_boundary_th=DEPTH_BOUNDARY_TH)
         .load_track(
             f"*uniform*{TAP_MODE}",
@@ -231,12 +241,36 @@ def static_reconstruct(ws, log_path, fit_cfg):
         #
         gt_cam=cams,
         iso_focal=getattr(fit_cfg, "iso_focal", False),
-        rescale_gt_cam_transl=getattr(fit_cfg, "rescale_gt_cam_transl", False),
-        ba_lr_cam_f=getattr(fit_cfg, "ba_lr_cam_f", 0.0003),
-        ba_lr_dep_c=getattr(fit_cfg, "ba_lr_dep_c", 0.001),
-        ba_lr_dep_s=getattr(fit_cfg, "ba_lr_dep_s", 0.001),
-        ba_lr_cam_q=getattr(fit_cfg, "ba_lr_cam_q", 0.0003),
-        ba_lr_cam_t=getattr(fit_cfg, "ba_lr_cam_t", 0.0003),
+        rescale_gt_cam_transl=(
+            getattr(fit_cfg, "rescale_gt_cam_transl", False)
+            if not policy["freeze_camera_geometry"]
+            else False
+        ),
+        ba_lr_cam_f=(
+            getattr(fit_cfg, "ba_lr_cam_f", 0.0003)
+            if not policy["freeze_camera_geometry"]
+            else 0.0
+        ),
+        ba_lr_dep_c=(
+            getattr(fit_cfg, "ba_lr_dep_c", 0.001)
+            if policy["optimize_bundle_depth"]
+            else 0.0
+        ),
+        ba_lr_dep_s=(
+            getattr(fit_cfg, "ba_lr_dep_s", 0.001)
+            if policy["optimize_bundle_depth"]
+            else 0.0
+        ),
+        ba_lr_cam_q=(
+            getattr(fit_cfg, "ba_lr_cam_q", 0.0003)
+            if not policy["freeze_camera_geometry"]
+            else 0.0
+        ),
+        ba_lr_cam_t=(
+            getattr(fit_cfg, "ba_lr_cam_t", 0.0003)
+            if not policy["freeze_camera_geometry"]
+            else 0.0
+        ),
         #
         ba_lambda_flow=getattr(fit_cfg, "ba_lambda_flow", 1.0),
         ba_lambda_depth=getattr(fit_cfg, "ba_lambda_depth", 0.1),

@@ -261,6 +261,7 @@ class Saved2D(nn.Module):
         # assign
         self.register_gradfree_buffer("dep", torch.Tensor(dep))
         self.register_gradfree_buffer("dep_mask", torch.Tensor(dep_mask).bool())
+        self.depth_scale_applied = False
         return self
 
     @torch.no_grad()
@@ -332,7 +333,11 @@ class Saved2D(nn.Module):
         # ), "Must use Long type for track! to avoid later roudning error, otherwise the system will fail."
 
         # re-scale the 3rd depth if the depth is rescaled
-        if self.track.shape[-1] == 3 and hasattr(self, "scale_nw"):
+        if (
+            self.track.shape[-1] == 3
+            and hasattr(self, "scale_nw")
+            and getattr(self, "depth_scale_applied", False)
+        ):
             logging.info(f"Also align the 3D track with the depth scale")
             self.track[:, :, 2] = self.track[:, :, 2].clone() * self.scale_nw
 
@@ -445,6 +450,7 @@ class Saved2D(nn.Module):
         dep_scale = dep_scale.to(self.dep.device)
         assert len(dep_scale) == self.T, f"dep_scale:{len(dep_scale)} vs T:{self.T}"
         self.dep = self.dep.clone() * dep_scale[:, None, None]
+        self.depth_scale_applied = True
         if self.track.shape[-1] == 3:
             logging.info(f"Also align the 3D track with the depth scale")
             self.track[:, :, 2] = self.track[:, :, 2].clone() * dep_scale[:, None]
@@ -461,20 +467,30 @@ class Saved2D(nn.Module):
         return self
 
     @torch.no_grad()
-    def normalize_depth(self, median_depth: float = 1.0):
+    def normalize_depth(self, median_depth: float = 1.0, apply_scale: bool = True):
         # align the median of the depth to 1.0
+        world_depth = self.dep.clone()
+        world_depth_fg = world_depth[self.dep_mask]
+        world_depth_median = float(torch.median(world_depth_fg))
+        self.original_depth_median = world_depth_median
         if median_depth < 0:
             scale_nw = 1.0
         else:
-            world_depth = self.dep.clone()
-            world_depth_fg = world_depth[self.dep_mask]
-            world_depth_median = torch.median(world_depth_fg)
             scale_nw = (
                 median_depth / world_depth_median
             )  # depth_normalized = scale_nw * depth_world
         self.scale_nw = float(scale_nw)
         assert hasattr(self, "dep_mask"), "Load DEP before noramlization!"
         # assert hasattr(self, "track"), "Load TAP before noramlization!"
+
+        self.depth_scale_applied = bool(apply_scale)
+        if not apply_scale:
+            logging.info(
+                "Skip depth normalization; preserve imported depth values with original_depth_median=%.6f and scale_nw=%.6f for threshold conversion",
+                world_depth_median,
+                self.scale_nw,
+            )
+            return self
 
         self.dep = self.dep.clone() * scale_nw
         if hasattr(self, "track") and self.track.shape[-1] == 3:

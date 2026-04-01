@@ -2,6 +2,7 @@
 from matplotlib import pyplot as plt
 import torch, numpy as np
 import os, sys, os.path as osp
+import glob
 from tqdm import tqdm
 import logging, imageio
 from pytorch3d.ops import knn_points
@@ -99,8 +100,15 @@ def compute_static_ba(
         optim_list.append(
             {"params": [param_dep_corr], "lr": lr_dep_c, "name": "dep_correction"}
         )
-    optimizer = optimizer_class(optim_list)
+    optimizer = None
     scheduler = None
+    if len(optim_list) > 0:
+        optimizer = optimizer_class(optim_list)
+    else:
+        logging.info(
+            "Static BA received no optimizable parameters; skip optimization and write identity bundle outputs"
+        )
+        total_steps = 0
     s_track_valid_mask_w = s_track_valid_mask.float()
     s_track_valid_mask_w = s_track_valid_mask_w / s_track_valid_mask_w.sum(0)
 
@@ -135,12 +143,16 @@ def compute_static_ba(
                         "name": "dep_correction",
                     }
                 )
-            optimizer = optimizer_class(optim_list)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                total_steps - switch_to_ind_step,
-                eta_min=min(lr_cam_q, lr_cam_t) / 10.0,
-            )
+            if len(optim_list) > 0:
+                optimizer = optimizer_class(optim_list)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    total_steps - switch_to_ind_step,
+                    eta_min=min(lr_cam_q, lr_cam_t) / 10.0,
+                )
+            else:
+                optimizer = None
+                scheduler = None
 
         optimizer.zero_grad()
 
@@ -292,10 +304,12 @@ def compute_static_ba(
                 )
 
     # viz
-    make_video_from_pattern(
-        osp.join(viz_dir, "static_scaffold_init_*.jpg"),
-        osp.join(log_dir, "static_scaffold_init.mp4"),
-    )
+    viz_frames = sorted(glob.glob(osp.join(viz_dir, "static_scaffold_init_*.jpg")))
+    if len(viz_frames) > 0:
+        make_video_from_pattern(
+            osp.join(viz_dir, "static_scaffold_init_*.jpg"),
+            osp.join(log_dir, "static_scaffold_init.mp4"),
+        )
 
     if total_steps > 0:
         fig = plt.figure(figsize=(21, 3))

@@ -1,11 +1,15 @@
-exp_name: cowboy_cat_vipe_init
+exp_name: cowboy_cat_vipe_fixed_scene
 mode: wild
 
-known_camera_mode: init
+known_scene_mode: fixed
+known_camera_mode: fixed
+known_depth_mode: fixed
 known_camera_format: vipe
 known_camera_convention: opencv
-known_camera_pose_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/pred_traj.txt
-known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/pred_intrinsics.txt
+# known_camera_pose_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/pred_traj.txt
+known_camera_pose_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/pred_traj.txt
+# known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/pred_intrinsics.txt
+known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/pred_intrinsics.txt
 depth_dirname: vipe_depth
 tap_mode: bootstapir
 

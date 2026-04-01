@@ -1,9 +1,11 @@
 dep_mode: vipe
 known_depth_format: vipe_scene_npy
+# known_depth_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter
 known_depth_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene
 
 known_camera_format: vipe
-known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/intrinsics/851422b7258e44a7ad04a9789be82299.npz
+# known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/pred_intrinsics.txt
+known_camera_intrinsics_path: /home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/pred_intrinsics.txt
 
 tap_mode: bootstapir
 flow_mode: raft
