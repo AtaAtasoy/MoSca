@@ -194,3 +194,4 @@ weights.zip
 .vscode
 runs/
 gen3c-prior/
+vcn_vis_scripts/

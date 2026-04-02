@@ -1,5 +1,4 @@
 import argparse
-import json
 import logging
 import os
 import os.path as osp
@@ -12,7 +11,11 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from data_utils.known_camera_helpers import load_vipe_camera_priors
+from data_utils.known_camera_helpers import (
+    load_camera_normalization_params,
+    load_vipe_camera_priors,
+    transform_camera_T_wc_list,
+)
 from lib_moca.camera import MonocularCameras
 from lib_mosca.dynamic_gs import DynSCFGaussian
 from lib_mosca.static_gs import StaticGaussian
@@ -32,6 +35,12 @@ def configure_logging():
 def parse_args():
     parser = argparse.ArgumentParser("Render a finished MoSca experiment")
     parser.add_argument("--logdir", type=str, required=True, help="Finished run dir")
+    parser.add_argument(
+        "--checkpoint_prefix",
+        type=str,
+        default="photometric",
+        help="Checkpoint prefix to load, e.g. photometric or patch_gen3c",
+    )
     parser.add_argument(
         "--cfg",
         type=str,
@@ -186,20 +195,22 @@ def resolve_cfg_path(args):
     return infer_cfg_from_logdir(args.logdir)
 
 
-def load_experiment(logdir, device):
+def load_experiment(logdir, device, checkpoint_prefix="photometric"):
     cams = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(logdir, "photometric_cam.pth"), map_location="cpu")
+        torch.load(
+            osp.join(logdir, f"{checkpoint_prefix}_cam.pth"), map_location="cpu"
+        )
     ).to(device)
     s_model = StaticGaussian.load_from_ckpt(
         torch.load(
-            osp.join(logdir, f"photometric_s_model_{GS_BACKEND.lower()}.pth"),
+            osp.join(logdir, f"{checkpoint_prefix}_s_model_{GS_BACKEND.lower()}.pth"),
             map_location="cpu",
         ),
         device=device,
     ).to(device)
     d_model = DynSCFGaussian.load_from_ckpt(
         torch.load(
-            osp.join(logdir, f"photometric_d_model_{GS_BACKEND.lower()}.pth"),
+            osp.join(logdir, f"{checkpoint_prefix}_d_model_{GS_BACKEND.lower()}.pth"),
             map_location="cpu",
         ),
         device=device,
@@ -252,58 +263,6 @@ def validate_test_camera_normalization_args(args):
         raise ValueError(
             "--test_camera_normalization_params requires --test_camera_normalization_mode"
         )
-
-
-def load_test_camera_normalization_params(json_path, device):
-    if not osp.exists(json_path):
-        raise FileNotFoundError(
-            f"Normalization params file not found: {json_path}"
-        )
-    with open(json_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    if not isinstance(payload, dict):
-        raise ValueError(
-            f"Expected normalization params JSON object, got {type(payload).__name__}"
-        )
-    if "center" not in payload or "scale" not in payload:
-        raise ValueError(
-            "Normalization params must contain 'center' and 'scale' keys"
-        )
-
-    center = torch.as_tensor(payload["center"], dtype=torch.float64, device=device)
-    if center.shape != (3,):
-        raise ValueError(
-            f"Expected normalization center shape (3,), got {tuple(center.shape)}"
-        )
-
-    scale = float(payload["scale"])
-    if scale <= 0.0:
-        raise ValueError(f"Normalization scale must be positive, got {scale}")
-
-    return {"center": center, "scale": scale}
-
-
-def transform_test_camera_T_wc_list(T_wc, normalization_params, mode):
-    if mode not in ["normalized_to_raw", "raw_to_normalized"]:
-        raise ValueError(f"Unsupported normalization mode: {mode}")
-
-    T_wc = torch.as_tensor(T_wc, dtype=torch.float64).clone()
-    assert T_wc.ndim == 3 and T_wc.shape[1:] == (
-        4,
-        4,
-    ), f"Expected T_wc shape (T,4,4), got {tuple(T_wc.shape)}"
-
-    center = normalization_params["center"].to(T_wc.device)
-    scale = float(normalization_params["scale"])
-    t_wc = T_wc[:, :3, 3]
-
-    if mode == "normalized_to_raw":
-        T_wc[:, :3, 3] = t_wc / scale + center[None]
-    else:
-        T_wc[:, :3, 3] = scale * (t_wc - center[None])
-    T_wc[:, 3, :] = 0.0
-    T_wc[:, 3, 3] = 1.0
-    return T_wc
 
 
 def convert_T_wc_to_T_cw(T_wc, device, dtype=torch.float32):
@@ -500,10 +459,10 @@ def get_test_sequences(args, device):
     )
     test_T_wc = test_priors["T_wc"] # cam2world
     if args.test_camera_normalization_params is not None:
-        normalization_params = load_test_camera_normalization_params(
+        normalization_params = load_camera_normalization_params(
             args.test_camera_normalization_params, device=test_T_wc.device
         )
-        test_T_wc = transform_test_camera_T_wc_list(
+        test_T_wc = transform_camera_T_wc_list(
             test_T_wc,
             normalization_params=normalization_params,
             mode=args.test_camera_normalization_mode,
@@ -600,7 +559,9 @@ def main():
         savedir = args.savedir
     os.makedirs(savedir, exist_ok=True)
 
-    cams, s_model, d_model = load_experiment(args.logdir, device)
+    cams, s_model, d_model = load_experiment(
+        args.logdir, device, checkpoint_prefix=args.checkpoint_prefix
+    )
 
     cfg = None
     if args.camera_set in ["test", "both"] or args.show_cameras:

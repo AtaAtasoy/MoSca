@@ -51,6 +51,35 @@ from photo_recon_viz_utils import (
 )
 
 
+def convert_single_T_wc_to_T_cw(T_wc):
+    T_wc = torch.as_tensor(T_wc, dtype=torch.float32)
+    R_wc = T_wc[:3, :3]
+    t_wc = T_wc[:3, 3]
+    R_cw = R_wc.transpose(0, 1)
+    T_cw = torch.eye(4, dtype=T_wc.dtype, device=T_wc.device)
+    T_cw[:3, :3] = R_cw
+    T_cw[:3, 3] = -R_cw @ t_wc
+    return T_cw
+
+
+def compute_fixed_camera_rgb_branch_loss(
+    sequence, sequence_index, render_dict, ssim_lambda=0.1
+):
+    sup_mask = sequence.get_rgb_mask(sequence_index)
+    loss_rgb, rgb_loss_i, pred_rgb, gt_rgb = compute_rgb_loss(
+        sequence.rgb[sequence_index],
+        render_dict,
+        sup_mask,
+        ssim_lambda=ssim_lambda,
+    )
+    extra_losses = {
+        "dep": torch.zeros_like(loss_rgb),
+        "track": torch.zeros_like(loss_rgb),
+        "mask": torch.zeros_like(loss_rgb),
+    }
+    return loss_rgb, rgb_loss_i, pred_rgb, gt_rgb, extra_losses
+
+
 def get_recon_cfg(cfg_fn=None):
     if cfg_fn is None:
         logging.info("No cfg_fn provided, use dummy cfg")
@@ -607,7 +636,7 @@ class DynReconstructionSolver:
                     bg_color = np.random.rand(3).tolist()
                 else:
                     bg_color = default_bg_color  # [1.0, 1.0, 1.0]
-                if GS_BACKEND in ["natie_add3"]:
+                if GS_BACKEND in ["native_add3"]:
                     # the render internally has another protection, because if not set, the grad has bug
                     bg_color += [0.0, 0.0, 0.0]
 
@@ -1223,6 +1252,672 @@ class DynReconstructionSolver:
                 )
                 d_model.return_cate_colors_flag = False
                 s_model.return_cate_colors_flag = False
+        torch.cuda.empty_cache()
+        return
+
+    def patch_photometric_fit(
+        self,
+        anchor_s2d: Saved2D,
+        anchor_cams: MonocularCameras,
+        patch_seq,
+        s_model: StaticGaussian,
+        d_model: DynSCFGaussian = None,
+        total_steps=4000,
+        stage1_steps=1000,
+        stage2_steps=2000,
+        stage3_steps=1000,
+        anchor_views_per_step=1,
+        patch_views_per_step=1,
+        topo_update_feq=50,
+        skinning_corr_start_steps=1e10,
+        s_gs_ctrl_cfg: GSControlCFG = GSControlCFG(
+            densify_steps=400,
+            reset_steps=2000,
+            prune_steps=400,
+            densify_max_grad=0.00025,
+            densify_percent_dense=0.01,
+            prune_opacity_th=0.012,
+            reset_opacity=0.01,
+        ),
+        d_gs_ctrl_cfg: GSControlCFG = GSControlCFG(
+            densify_steps=400,
+            reset_steps=2000,
+            prune_steps=400,
+            densify_max_grad=0.00015,
+            densify_percent_dense=0.01,
+            prune_opacity_th=0.012,
+            reset_opacity=0.01,
+        ),
+        optimizer_cfg: OptimCFG = OptimCFG(
+            lr_cam_f=0.0,
+            lr_cam_q=0.0,
+            lr_cam_t=0.0,
+            lr_p=0.00016,
+            lr_q=0.001,
+            lr_s=0.005,
+            lr_o=0.05,
+            lr_sph=0.0025,
+            lr_np=0.0001,
+            lr_nq=0.001,
+            lr_w=0.0,
+        ),
+        anchor_weight=1.0,
+        patch_rgb_weight=1.0,
+        patch_rgb_ssim_lambda=0.1,
+        lambda_rgb=1.0,
+        lambda_dep=1.0,
+        lambda_mask=0.0,
+        dep_st_invariant=True,
+        lambda_normal=1.0,
+        lambda_depth_normal=0.05,
+        lambda_distortion=100.0,
+        lambda_arap_coord=3.0,
+        lambda_arap_len=0.0,
+        lambda_vel_xyz_reg=0.0,
+        lambda_vel_rot_reg=0.0,
+        lambda_acc_xyz_reg=0.5,
+        lambda_acc_rot_reg=0.5,
+        lambda_small_w_reg=0.0,
+        lambda_track=0.0,
+        track_flow_chance=0.0,
+        track_flow_interval_candidates=[1],
+        track_loss_clamp=100.0,
+        track_loss_protect_steps=100,
+        track_loss_interval=3,
+        track_loss_start_step=-1,
+        track_loss_end_step=100000,
+        reg_radius=None,
+        use_decay=False,
+        decay_start=2000,
+        temporal_diff_shift=[1, 3, 6],
+        temporal_diff_weight=[0.6, 0.3, 0.1],
+        geo_reg_start_steps=0,
+        dyn_scf_prune_steps=[],
+        dyn_scf_prune_sk_th=0.02,
+        stage2_geo_lr_scale=0.25,
+        stage2_node_lr_scale=0.25,
+        stage2_node_sigma_lr_scale=0.25,
+        stage3_geo_lr_scale=1.0,
+        stage3_node_lr_scale=1.0,
+        stage3_node_sigma_lr_scale=1.0,
+        viz_skip_t=5,
+        viz_cheap_interval=1000,
+        viz_move_angle_deg=30.0,
+        random_bg=False,
+        default_bg_color=[1.0, 1.0, 1.0],
+        phase_name="patch_gen3c",
+    ):
+        logging.info("Fixed-camera patch fit with GS-BACKEND=%s", GS_BACKEND.lower())
+        torch.cuda.empty_cache()
+
+        stage_total = stage1_steps + stage2_steps + stage3_steps
+        if stage_total > 0 and total_steps != stage_total:
+            logging.warning(
+                "Patch total_steps=%d disagrees with stage sum=%d; use the stage sum",
+                total_steps,
+                stage_total,
+            )
+            total_steps = stage_total
+        if total_steps < 0:
+            raise ValueError(f"total_steps must be >= 0, got {total_steps}")
+        if anchor_views_per_step <= 0 or patch_views_per_step <= 0:
+            raise ValueError("anchor_views_per_step and patch_views_per_step must be > 0")
+
+        device = anchor_s2d.rgb.device
+        d_flag = d_model is not None
+        corr_flag = lambda_track > 0.0 and d_flag
+        sup_mask_type = "all" if d_flag else "static"
+        if d_flag and reg_radius is None:
+            reg_radius = int(np.array(temporal_diff_shift).max()) * 2
+            logging.info("Set reg_radius=%d for patch fit", reg_radius)
+
+        for param in anchor_cams.parameters():
+            param.requires_grad_(False) # fix the camera for patch fit, only optimize the model
+        s_model.train()
+        if d_flag:
+            d_model.train()
+
+        optimizer_static = torch.optim.Adam(
+            s_model.get_optimizable_list(**optimizer_cfg.get_static_lr_dict)
+        )
+        optimizer_dynamic = None
+        if d_flag:
+            optimizer_dynamic = torch.optim.Adam(
+                d_model.get_optimizable_list(**optimizer_cfg.get_dynamic_lr_dict)
+            )
+        for optimizer in [optimizer_static, optimizer_dynamic]:
+            if optimizer is None:
+                continue
+            for group in optimizer.param_groups:
+                group["base_lr"] = float(group["lr"])
+
+        gs_scheduling_func_dict = {}
+        if use_decay and total_steps > decay_start:
+            gs_scheduling_func_dict, _ = optimizer_cfg.get_scheduler(
+                total_steps=max(1, total_steps - decay_start)
+            )
+
+        latest_track_event = 0
+        base_u, base_v = np.meshgrid(np.arange(anchor_s2d.W), np.arange(anchor_s2d.H))
+        base_uv = np.stack([base_u, base_v], -1)
+        base_uv = torch.tensor(base_uv, device=device).long()
+
+        if d_flag:
+            n_group_static = len(s_model.group_id.unique())
+            n_group_dynamic = len(d_model.scf.unique_grouping)
+            color_plate = get_colorplate(n_group_static + n_group_dynamic)
+            color_plate = color_plate[torch.randperm(len(color_plate))]
+            s_model.get_cate_color(color_plate=color_plate[:n_group_static].to(device))
+            d_model.get_cate_color(color_plate=color_plate[n_group_static:].to(device))
+
+        def get_stage(step):
+            if step < stage1_steps:
+                return 1
+            if step < stage1_steps + stage2_steps:
+                return 2
+            return 3
+
+        def get_stage_lr_scale(name, stage):
+            if stage == 1: # appearance only
+                return {
+                    "xyz": 0.0,
+                    "rotation": 0.0,
+                    "scaling": 0.0,
+                    "node_xyz": 0.0,
+                    "node_rotation": 0.0,
+                    "node_sigma": 0.0,
+                    "opacity": 1.0,
+                    "f_dc": 1.0,
+                    "f_rest": 1.0,
+                    "dyn_logit": 0.0,
+                    "skinning_w": 0.0,
+                }.get(name, 1.0)
+            if stage == 2:
+                return {
+                    "xyz": stage2_geo_lr_scale,
+                    "rotation": stage2_geo_lr_scale,
+                    "scaling": stage2_geo_lr_scale,
+                    "node_xyz": stage2_node_lr_scale,
+                    "node_rotation": stage2_node_lr_scale,
+                    "node_sigma": stage2_node_sigma_lr_scale,
+                    "opacity": 1.0,
+                    "f_dc": 1.0,
+                    "f_rest": 1.0,
+                    "dyn_logit": 0.0,
+                    "skinning_w": 0.0,
+                }.get(name, 1.0)
+            return {
+                "xyz": stage3_geo_lr_scale,
+                "rotation": stage3_geo_lr_scale,
+                "scaling": stage3_geo_lr_scale,
+                "node_xyz": stage3_node_lr_scale,
+                "node_rotation": stage3_node_lr_scale,
+                "node_sigma": stage3_node_sigma_lr_scale,
+                "opacity": 1.0,
+                "f_dc": 1.0,
+                "f_rest": 1.0,
+                "dyn_logit": 0.0,
+                "skinning_w": 0.0,
+            }.get(name, 1.0)
+
+        def apply_stage_lrs(step, stage):
+            for optimizer in [optimizer_static, optimizer_dynamic]:
+                if optimizer is None:
+                    continue
+                for group in optimizer.param_groups:
+                    lr = group["base_lr"]
+                    if use_decay and step >= decay_start and group["name"] in gs_scheduling_func_dict:
+                        lr = gs_scheduling_func_dict[group["name"]](step - decay_start)
+                    group["lr"] = lr * get_stage_lr_scale(group["name"], stage)
+
+        def select_view_indices(T, count):
+            replace = count > T
+            return np.random.choice(T, count, replace=replace).tolist()
+
+        def plot_patch_losses(loss_pack):
+            if len(loss_pack["total"]) == 0:
+                return
+            fig = plt.figure(figsize=(24, 8))
+            ordered = [
+                ("total", loss_pack["total"]),
+                ("anchor_rgb", loss_pack["anchor_rgb"]),
+                ("anchor_dep", loss_pack["anchor_dep"]),
+                ("anchor_track", loss_pack["anchor_track"]),
+                ("patch_rgb", loss_pack["patch_rgb"]),
+                ("arap_coord", loss_pack["arap_coord"]),
+                ("arap_len", loss_pack["arap_len"]),
+                ("vel_xyz", loss_pack["vel_xyz"]),
+                ("vel_rot", loss_pack["vel_rot"]),
+                ("acc_xyz", loss_pack["acc_xyz"]),
+                ("acc_rot", loss_pack["acc_rot"]),
+                ("small_w", loss_pack["small_w"]),
+                ("S-N", loss_pack["s_n"]),
+                ("D-N", loss_pack["d_n"]),
+                ("D-M", loss_pack["d_m"]),
+            ]
+            for plt_i, (title, values) in enumerate(ordered):
+                plt.subplot(2, 8, plt_i + 1)
+                plt.plot(values)
+                plt.title(f"{title} End={values[-1]:.4f}")
+            plt.tight_layout()
+            plt.savefig(osp.join(self.log_dir, f"{phase_name}_optim_loss.jpg"))
+            plt.close()
+
+        loss_pack = {
+            "total": [],
+            "anchor_rgb": [],
+            "anchor_dep": [],
+            "anchor_track": [],
+            "patch_rgb": [],
+            "arap_coord": [],
+            "arap_len": [],
+            "vel_xyz": [],
+            "vel_rot": [],
+            "acc_xyz": [],
+            "acc_rot": [],
+            "small_w": [],
+            "s_n": [],
+            "d_n": [],
+            "d_m": [],
+        }
+
+        for step in tqdm(range(total_steps)):
+            stage = get_stage(step)
+            apply_stage_lrs(step, stage)
+
+            if d_flag and step == skinning_corr_start_steps:
+                logging.info(
+                    "At step=%d stop topology updates and enable skinning weight correction",
+                    step,
+                )
+                d_model.set_surface_deform()
+
+            corr_exe_flag = (
+                corr_flag
+                and step > latest_track_event + track_loss_protect_steps
+                and step % track_loss_interval == 0
+                and step >= track_loss_start_step
+                and step < track_loss_end_step
+            )
+
+            optimizer_static.zero_grad()
+            s_model.zero_grad()
+            if d_flag:
+                optimizer_dynamic.zero_grad()
+                d_model.zero_grad()
+                if stage > 1 and step % topo_update_feq == 0:
+                    d_model.scf.update_topology()
+
+            anchor_view_ind_list = select_view_indices(anchor_cams.T, anchor_views_per_step)
+            if corr_exe_flag:
+                corr_dst_ind_list, corr_flow_flag_list = [], []
+                for view_ind in anchor_view_ind_list:
+                    flow_flag = np.random.rand() < track_flow_chance
+                    corr_flow_flag_list.append(flow_flag)
+                    if flow_flag:
+                        corr_dst_ind_candidates = []
+                        for flow_interval in track_flow_interval_candidates:
+                            if view_ind + flow_interval < anchor_cams.T:
+                                corr_dst_ind_candidates.append(view_ind + flow_interval)
+                            if view_ind - flow_interval >= 0:
+                                corr_dst_ind_candidates.append(view_ind - flow_interval)
+                        corr_dst_ind = np.random.choice(corr_dst_ind_candidates)
+                    else:
+                        corr_dst_ind = view_ind
+                        while corr_dst_ind == view_ind:
+                            corr_dst_ind = np.random.choice(anchor_cams.T)
+                    corr_dst_ind_list.append(corr_dst_ind)
+                corr_dst_ind_list = np.array(corr_dst_ind_list)
+            else:
+                corr_dst_ind_list = anchor_view_ind_list
+                corr_flow_flag_list = [False] * len(anchor_view_ind_list)
+
+            anchor_render_dict_list = []
+            anchor_corr_render_dict_list = []
+            patch_render_dict_list = []
+
+            zero = anchor_s2d.rgb.new_tensor(0.0)
+            loss_anchor_rgb = zero.clone()
+            loss_anchor_dep = zero.clone()
+            loss_patch_rgb = zero.clone()
+            loss_mask = zero.clone()
+            loss_track = zero.clone()
+            loss_nrm = zero.clone()
+            loss_dep_nrm_reg = zero.clone()
+            loss_distortion_reg = zero.clone()
+
+            for inner_i, view_ind in enumerate(anchor_view_ind_list):
+                dst_ind = int(corr_dst_ind_list[inner_i])
+                flow_flag = corr_flow_flag_list[inner_i]
+                gs5 = [list(s_model())]
+                add_buffer = None
+                if corr_exe_flag and d_flag:
+                    dst_xyz = torch.cat([gs5[0][0].detach(), d_model(dst_ind)[0]], 0)
+                    dst_xyz_cam = anchor_cams.trans_pts_to_cam(dst_ind, dst_xyz)
+                    if GS_BACKEND in ["native_add3"]:
+                        add_buffer = dst_xyz_cam
+                if d_flag:
+                    gs5.append(list(d_model(view_ind)))
+                bg_color = np.random.rand(3).tolist() if random_bg else default_bg_color
+                if GS_BACKEND in ["native_add3"]:
+                    bg_color += [0.0, 0.0, 0.0]
+                render_dict = render(
+                    gs5,
+                    anchor_s2d.H,
+                    anchor_s2d.W,
+                    anchor_cams.K(anchor_s2d.H, anchor_s2d.W),
+                    anchor_cams.T_cw(view_ind),
+                    bg_color=bg_color,
+                    add_buffer=add_buffer,
+                )
+                anchor_render_dict_list.append(render_dict)
+
+                rgb_sup_mask = anchor_s2d.get_mask_by_key(sup_mask_type)[view_ind]
+                _l_rgb, _, _, _ = compute_rgb_loss(
+                    anchor_s2d.rgb[view_ind].detach().clone(),
+                    render_dict,
+                    rgb_sup_mask,
+                )
+                dep_sup_mask = rgb_sup_mask * anchor_s2d.dep_mask[view_ind]
+                _l_dep, _, _, _ = compute_dep_loss(
+                    anchor_s2d.dep[view_ind].detach().clone(),
+                    render_dict,
+                    dep_sup_mask,
+                    st_invariant=dep_st_invariant,
+                )
+                loss_anchor_rgb = loss_anchor_rgb + _l_rgb
+                loss_anchor_dep = loss_anchor_dep + _l_dep
+
+                if corr_exe_flag and d_flag:
+                    if GS_BACKEND in ["native_add3"]:
+                        corr_render_dict = render_dict
+                        rendered_xyz_map = render_dict["buf"].permute(1, 2, 0)
+                    else:
+                        corr_render_dict = render(
+                            gs5,
+                            anchor_s2d.H,
+                            anchor_s2d.W,
+                            anchor_cams.K(anchor_s2d.H, anchor_s2d.W),
+                            anchor_cams.T_cw(view_ind),
+                            bg_color=[0.0, 0.0, 0.0],
+                            colors_precomp=dst_xyz_cam,
+                        )
+                        rendered_xyz_map = corr_render_dict["rgb"].permute(1, 2, 0)
+                    anchor_corr_render_dict_list.append(corr_render_dict)
+                    with torch.no_grad():
+                        if flow_flag:
+                            flow_ind = anchor_s2d.flow_ij_to_listind_dict[(view_ind, dst_ind)]
+                            flow = anchor_s2d.flow[flow_ind].detach().clone()
+                            flow_mask = anchor_s2d.flow_mask[flow_ind].detach().clone().bool()
+                            track_src = base_uv.clone().detach()[flow_mask]
+                            flow = flow[flow_mask]
+                            track_dst = track_src.float() + flow
+                        else:
+                            track_valid = anchor_s2d.track_mask[view_ind] & anchor_s2d.track_mask[dst_ind]
+                            track_src = anchor_s2d.track[view_ind][track_valid][..., :2]
+                            track_dst = anchor_s2d.track[dst_ind][track_valid][..., :2]
+                        src_fetch_index = (
+                            track_src[:, 1].long() * anchor_s2d.W + track_src[:, 0].long()
+                        )
+                    if len(track_src) > 0:
+                        warped_xyz_cam = rendered_xyz_map.reshape(-1, 3)[src_fetch_index]
+                        track_loss_mask = warped_xyz_cam[:, 2] > 1e-4
+                        if track_loss_mask.sum() > 0:
+                            pred_track_dst = anchor_cams.project(warped_xyz_cam)
+                            L = min(anchor_s2d.W, anchor_s2d.H)
+                            pred_track_dst[:, :1] = (
+                                (pred_track_dst[:, :1] + anchor_s2d.W / L) / 2.0 * L
+                            )
+                            pred_track_dst[:, 1:] = (
+                                (pred_track_dst[:, 1:] + anchor_s2d.H / L) / 2.0 * L
+                            )
+                            _loss_track = (pred_track_dst - track_dst).norm(dim=-1)[
+                                track_loss_mask
+                            ]
+                            _loss_track = torch.clamp(_loss_track, 0.0, track_loss_clamp)
+                            loss_track = loss_track + _loss_track.mean()
+
+                if GS_BACKEND == "gof":
+                    _l_nrm, _, _, _ = compute_normal_loss(
+                        anchor_s2d.nrm[view_ind].detach().clone(),
+                        render_dict,
+                        dep_sup_mask,
+                    )
+                    loss_nrm = loss_nrm + _l_nrm
+                    if step > geo_reg_start_steps:
+                        _l_reg_nrm, _, _, _ = compute_normal_reg_loss(
+                            anchor_s2d, anchor_cams, render_dict
+                        )
+                        _l_reg_distortion, _ = compute_dep_reg_loss(
+                            anchor_s2d.rgb[view_ind].detach().clone(), render_dict
+                        )
+                        loss_dep_nrm_reg = loss_dep_nrm_reg + _l_reg_nrm
+                        loss_distortion_reg = (
+                            loss_distortion_reg + _l_reg_distortion
+                        )
+
+                if d_flag and lambda_mask > 0.0:
+                    s_cate_sph, s_gid2color = s_model.get_cate_color(
+                        perm=torch.randperm(len(s_model.group_id.unique()))
+                    )
+                    d_cate_sph, d_gid2color = d_model.get_cate_color(
+                        perm=torch.randperm(len(d_model.scf.unique_grouping))
+                    )
+                    with torch.no_grad():
+                        inst_map = anchor_s2d.inst[view_ind]
+                        gt_mask = torch.zeros_like(anchor_s2d.rgb[0])
+                        for gid, color in d_gid2color.items():
+                            gt_mask[inst_map == gid] = color[None]
+                        for gid, color in s_gid2color.items():
+                            gt_mask[inst_map == gid] = color[None]
+                    gs5[1][-1] = d_cate_sph
+                    gs5[0][-1] = s_cate_sph
+                    render_mask = render(
+                        gs5,
+                        anchor_s2d.H,
+                        anchor_s2d.W,
+                        anchor_cams.K(anchor_s2d.H, anchor_s2d.W),
+                        anchor_cams.T_cw(view_ind),
+                        bg_color=[0.0, 0.0, 0.0],
+                    )
+                    pred_mask = render_mask["rgb"].permute(1, 2, 0)
+                    loss_mask = loss_mask + torch.nn.functional.mse_loss(pred_mask, gt_mask)
+
+            patch_view_ind_list = select_view_indices(patch_seq.T, patch_views_per_step)
+            for patch_index in patch_view_ind_list:
+                model_tid = int(patch_seq.model_tids[patch_index].item())
+                gs5 = [list(s_model())]
+                if d_flag:
+                    gs5.append(list(d_model(model_tid)))
+                bg_color = np.random.rand(3).tolist() if random_bg else default_bg_color
+                if GS_BACKEND in ["natie_add3"]:
+                    bg_color += [0.0, 0.0, 0.0]
+                patch_render_dict = render(
+                    gs5,
+                    patch_seq.H,
+                    patch_seq.W,
+                    patch_seq.K,
+                    convert_single_T_wc_to_T_cw(patch_seq.T_wc[patch_index]),
+                    bg_color=bg_color,
+                )
+                patch_render_dict_list.append(patch_render_dict)
+                _l_patch_rgb, _, _, _, patch_extra_losses = (
+                    compute_fixed_camera_rgb_branch_loss(
+                        patch_seq,
+                        patch_index,
+                        patch_render_dict,
+                        ssim_lambda=patch_rgb_ssim_lambda,
+                    )
+                )
+                loss_patch_rgb = loss_patch_rgb + _l_patch_rgb
+                loss_patch_rgb = loss_patch_rgb + patch_extra_losses["dep"] * 0.0
+                loss_patch_rgb = loss_patch_rgb + patch_extra_losses["track"] * 0.0
+
+            if len(anchor_view_ind_list) > 0:
+                norm = float(len(anchor_view_ind_list))
+                loss_anchor_rgb = loss_anchor_rgb / norm
+                loss_anchor_dep = loss_anchor_dep / norm
+                loss_mask = loss_mask / norm
+                loss_track = loss_track / norm
+                loss_nrm = loss_nrm / norm
+                loss_dep_nrm_reg = loss_dep_nrm_reg / norm
+                loss_distortion_reg = loss_distortion_reg / norm
+            if len(patch_view_ind_list) > 0:
+                loss_patch_rgb = loss_patch_rgb / float(len(patch_view_ind_list))
+
+            if d_flag:
+                reg_anchor_tid = anchor_view_ind_list[0]
+                _l = max(0, reg_anchor_tid - reg_radius)
+                _r = min(anchor_cams.T, reg_anchor_tid + 1 + reg_radius)
+                reg_tids = torch.arange(_l, _r, device=device)
+            else:
+                reg_tids = None
+
+            if (lambda_arap_coord > 0.0 or lambda_arap_len > 0.0) and d_flag:
+                loss_arap_coord, loss_arap_len = d_model.scf.compute_arap_loss(
+                    reg_tids,
+                    temporal_diff_shift=temporal_diff_shift,
+                    temporal_diff_weight=temporal_diff_weight,
+                )
+            else:
+                loss_arap_coord = zero.clone()
+                loss_arap_len = zero.clone()
+
+            if (
+                lambda_vel_xyz_reg > 0.0
+                or lambda_vel_rot_reg > 0.0
+                or lambda_acc_xyz_reg > 0.0
+                or lambda_acc_rot_reg > 0.0
+            ) and d_flag:
+                (
+                    loss_vel_xyz_reg,
+                    loss_vel_rot_reg,
+                    loss_acc_xyz_reg,
+                    loss_acc_rot_reg,
+                ) = d_model.scf.compute_vel_acc_loss(reg_tids)
+            else:
+                loss_vel_xyz_reg = zero.clone()
+                loss_vel_rot_reg = zero.clone()
+                loss_acc_xyz_reg = zero.clone()
+                loss_acc_rot_reg = zero.clone()
+
+            loss_small_w = abs(d_model._skinning_weight).mean() if d_flag else zero.clone()
+
+            loss = (
+                anchor_weight
+                * (
+                    loss_anchor_rgb * lambda_rgb
+                    + loss_anchor_dep * lambda_dep
+                    + loss_mask * lambda_mask
+                    + loss_track * lambda_track
+                    + loss_nrm * lambda_normal
+                    + loss_dep_nrm_reg * lambda_depth_normal
+                    + loss_distortion_reg * lambda_distortion
+                )
+                + patch_rgb_weight * loss_patch_rgb
+                + loss_arap_coord * lambda_arap_coord
+                + loss_arap_len * lambda_arap_len
+                + loss_vel_xyz_reg * lambda_vel_xyz_reg
+                + loss_vel_rot_reg * lambda_vel_rot_reg
+                + loss_acc_xyz_reg * lambda_acc_xyz_reg
+                + loss_acc_rot_reg * lambda_acc_rot_reg
+                + loss_small_w * lambda_small_w_reg
+            )
+
+            loss.backward()
+
+            optimizer_static.step()
+            if d_flag:
+                optimizer_dynamic.step()
+
+            if stage == 3 and stage3_steps > 0:
+                if (
+                    step in d_gs_ctrl_cfg.reset_steps
+                    or step in s_gs_ctrl_cfg.reset_steps
+                ) and corr_flag:
+                    logging.info("Reset event happened during patch stage-3, protect tracking loss")
+                    latest_track_event = step
+
+                if len(patch_render_dict_list) > 0:
+                    apply_gs_control(
+                        render_list=patch_render_dict_list,
+                        model=s_model,
+                        gs_control_cfg=s_gs_ctrl_cfg,
+                        step=step,
+                        optimizer_gs=optimizer_static,
+                        first_N=s_model.N,
+                    )
+                    if d_flag:
+                        apply_gs_control(
+                            render_list=patch_render_dict_list,
+                            model=d_model,
+                            gs_control_cfg=d_gs_ctrl_cfg,
+                            step=step,
+                            optimizer_gs=optimizer_dynamic,
+                            last_N=d_model.N,
+                        )
+                if d_flag and step in dyn_scf_prune_steps:
+                    d_model.prune_nodes(
+                        optimizer_dynamic,
+                        prune_sk_th=dyn_scf_prune_sk_th,
+                        viz_fn=osp.join(self.viz_dir, f"{phase_name}_scf_prune_step={step}"),
+                    )
+
+            loss_pack["total"].append(loss.item())
+            loss_pack["anchor_rgb"].append(loss_anchor_rgb.item())
+            loss_pack["anchor_dep"].append(loss_anchor_dep.item())
+            loss_pack["anchor_track"].append(loss_track.item())
+            loss_pack["patch_rgb"].append(loss_patch_rgb.item())
+            loss_pack["arap_coord"].append(loss_arap_coord.item())
+            loss_pack["arap_len"].append(loss_arap_len.item())
+            loss_pack["vel_xyz"].append(loss_vel_xyz_reg.item())
+            loss_pack["vel_rot"].append(loss_vel_rot_reg.item())
+            loss_pack["acc_xyz"].append(loss_acc_xyz_reg.item())
+            loss_pack["acc_rot"].append(loss_acc_rot_reg.item())
+            loss_pack["small_w"].append(loss_small_w.item())
+            loss_pack["s_n"].append(s_model.N)
+            loss_pack["d_n"].append(d_model.N if d_flag else 0)
+            loss_pack["d_m"].append(d_model.M if d_flag else 0)
+
+            if viz_cheap_interval > 0 and (
+                step % viz_cheap_interval == 0 or step == total_steps - 1
+            ):
+                plot_patch_losses(loss_pack)
+
+        s_save_fn = osp.join(self.log_dir, f"{phase_name}_s_model_{GS_BACKEND.lower()}.pth")
+        torch.save(s_model.state_dict(), s_save_fn)
+        torch.save(anchor_cams.state_dict(), osp.join(self.log_dir, f"{phase_name}_cam.pth"))
+        if d_flag:
+            d_save_fn = osp.join(
+                self.log_dir, f"{phase_name}_d_model_{GS_BACKEND.lower()}.pth"
+            )
+            torch.save(d_model.state_dict(), d_save_fn)
+
+        plot_patch_losses(loss_pack)
+        if total_steps > 0:
+            viz2d_total_video(
+                viz_vid_fn=osp.join(self.log_dir, f"{phase_name}_2dviz.mp4"),
+                s2d=anchor_s2d,
+                start_from=0,
+                end_at=anchor_cams.T - 1,
+                skip_t=viz_skip_t,
+                cams=anchor_cams,
+                s_model=s_model,
+                d_model=d_model,
+                move_around_angle_deg=viz_move_angle_deg,
+                print_text=False,
+            )
+            if d_flag:
+                viz_path = osp.join(self.log_dir, f"{phase_name}_3Dviz.mp4")
+                viz3d_total_video(
+                    anchor_cams,
+                    d_model,
+                    0,
+                    anchor_cams.T - 1,
+                    save_path=viz_path,
+                    res=480,
+                    s_model=s_model,
+                )
         torch.cuda.empty_cache()
         return
 

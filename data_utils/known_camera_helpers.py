@@ -1,3 +1,4 @@
+import json
 import logging
 import os.path as osp
 from glob import glob
@@ -194,3 +195,55 @@ def load_vipe_depth_priors(scene_dir, expected_T=None):
         dep_list.shape[2],
     )
     return dep_list
+
+
+def load_camera_normalization_params(json_path, device=None):
+    if not osp.exists(json_path):
+        raise FileNotFoundError(f"Normalization params file not found: {json_path}")
+    with open(json_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Expected normalization params JSON object, got {type(payload).__name__}"
+        )
+    if "center" not in payload or "scale" not in payload:
+        raise ValueError(
+            "Normalization params must contain 'center' and 'scale' keys"
+        )
+
+    if device is None:
+        device = torch.device("cpu")
+    center = torch.as_tensor(payload["center"], dtype=torch.float64, device=device)
+    if center.shape != (3,):
+        raise ValueError(
+            f"Expected normalization center shape (3,), got {tuple(center.shape)}"
+        )
+
+    scale = float(payload["scale"])
+    if scale <= 0.0:
+        raise ValueError(f"Normalization scale must be positive, got {scale}")
+
+    return {"center": center, "scale": scale}
+
+
+def transform_camera_T_wc_list(T_wc, normalization_params, mode):
+    if mode not in ["normalized_to_raw", "raw_to_normalized"]:
+        raise ValueError(f"Unsupported normalization mode: {mode}")
+
+    T_wc = torch.as_tensor(T_wc, dtype=torch.float64).clone()
+    assert T_wc.ndim == 3 and T_wc.shape[1:] == (
+        4,
+        4,
+    ), f"Expected T_wc shape (T,4,4), got {tuple(T_wc.shape)}"
+
+    center = normalization_params["center"].to(T_wc.device)
+    scale = float(normalization_params["scale"])
+    t_wc = T_wc[:, :3, 3]
+
+    if mode == "normalized_to_raw":
+        T_wc[:, :3, 3] = t_wc / scale + center[None]
+    else:
+        T_wc[:, :3, 3] = scale * (t_wc - center[None])
+    T_wc[:, 3, :] = 0.0
+    T_wc[:, 3, 3] = 1.0
+    return T_wc
