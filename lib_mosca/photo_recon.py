@@ -1803,6 +1803,7 @@ class DynReconstructionSolver:
 
             loss_small_w = abs(d_model._skinning_weight).mean() if d_flag else zero.clone()
 
+            # Total loss
             loss = (
                 anchor_weight
                 * (
@@ -1813,9 +1814,9 @@ class DynReconstructionSolver:
                     + loss_nrm * lambda_normal
                     + loss_dep_nrm_reg * lambda_depth_normal
                     + loss_distortion_reg * lambda_distortion
-                )
-                + patch_rgb_weight * loss_patch_rgb
-                + loss_arap_coord * lambda_arap_coord
+                ) # existing dynamic reconstruction loss on anchor views
+                + patch_rgb_weight * loss_patch_rgb # photometric loss on new patch views
+                + loss_arap_coord * lambda_arap_coord # Geometric regularizations
                 + loss_arap_len * lambda_arap_len
                 + loss_vel_xyz_reg * lambda_vel_xyz_reg
                 + loss_vel_rot_reg * lambda_vel_rot_reg

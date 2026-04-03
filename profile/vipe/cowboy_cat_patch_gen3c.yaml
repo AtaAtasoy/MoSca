@@ -20,7 +20,7 @@ gen3c_prior_ws: null
 patch_phase_name: patch_gen3c
 patch_save_preview_renders: true
 
-patch_anchor_weight: 0.5
+patch_anchor_weight: 1.0
 patch_gen3c_rgb_weight: 1.0
 patch_gen3c_rgb_ssim_lambda: 0.1
 
@@ -28,11 +28,11 @@ patch_anchor_views_per_step: 1
 patch_gen3c_views_per_step: 1
 
 # Stage 1: Appearance-only updates
-patch_stage1_steps: 2000
+patch_stage1_steps: 0
 # Step2: Conservative geometry updates at 0.25x
-patch_stage2_steps: 2000
+patch_stage2_steps: 0
 # Step3: Full geometry LR plus densify/prune/reset controls.
-patch_stage3_steps: 4000
+patch_stage3_steps: 8000
 
 patch_stage2_geo_lr_scale: 0.25
 patch_stage2_node_lr_scale: 0.25
@@ -49,14 +49,14 @@ patch_skinning_corr_start_steps: 10000000000
 patch_s_ctrl_densify_steps: 400
 patch_s_ctrl_prune_steps: 400
 patch_s_ctrl_reset_steps: 1000
-patch_s_ctrl_densify_max_grad: 0.0002
+patch_s_ctrl_densify_max_grad: 0.0001
 patch_s_ctrl_prune_opacity_th: 0.02
 patch_s_ctrl_reset_opacity: 0.01
 
 patch_d_ctrl_densify_steps: 300
 patch_d_ctrl_prune_steps: 300
 patch_d_ctrl_reset_steps: 1000
-patch_d_ctrl_densify_max_grad: 0.0001
+patch_d_ctrl_densify_max_grad: 0.00005
 patch_d_ctrl_prune_opacity_th: 0.02
 patch_d_ctrl_reset_opacity: 0.01
 
