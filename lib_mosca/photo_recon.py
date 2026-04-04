@@ -62,7 +62,7 @@ def convert_single_T_wc_to_T_cw(T_wc):
     return T_cw
 
 
-def compute_fixed_camera_rgb_branch_loss(
+def compute_fixed_camera_fuse_rgb_loss(
     sequence, sequence_index, render_dict, ssim_lambda=0.1
 ):
     sup_mask = sequence.get_rgb_mask(sequence_index)
@@ -1255,11 +1255,11 @@ class DynReconstructionSolver:
         torch.cuda.empty_cache()
         return
 
-    def patch_photometric_fit(
+    def fuse_photometric_fit(
         self,
         anchor_s2d: Saved2D,
         anchor_cams: MonocularCameras,
-        patch_seq,
+        fuse_seq,
         s_model: StaticGaussian,
         d_model: DynSCFGaussian = None,
         total_steps=4000,
@@ -1267,7 +1267,7 @@ class DynReconstructionSolver:
         stage2_steps=2000,
         stage3_steps=1000,
         anchor_views_per_step=1,
-        patch_views_per_step=1,
+        fuse_views_per_step=1,
         topo_update_feq=50,
         skinning_corr_start_steps=1e10,
         s_gs_ctrl_cfg: GSControlCFG = GSControlCFG(
@@ -1302,8 +1302,8 @@ class DynReconstructionSolver:
             lr_w=0.0,
         ),
         anchor_weight=1.0,
-        patch_rgb_weight=1.0,
-        patch_rgb_ssim_lambda=0.1,
+        fuse_rgb_weight=1.0,
+        fuse_rgb_ssim_lambda=0.1,
         lambda_rgb=1.0,
         lambda_dep=1.0,
         lambda_mask=0.0,
@@ -1345,23 +1345,23 @@ class DynReconstructionSolver:
         viz_move_angle_deg=30.0,
         random_bg=False,
         default_bg_color=[1.0, 1.0, 1.0],
-        phase_name="patch_gen3c",
+        phase_name="fuse_gen3c",
     ):
-        logging.info("Fixed-camera patch fit with GS-BACKEND=%s", GS_BACKEND.lower())
+        logging.info("Fixed-camera fuse fit with GS-BACKEND=%s", GS_BACKEND.lower())
         torch.cuda.empty_cache()
 
         stage_total = stage1_steps + stage2_steps + stage3_steps
         if stage_total > 0 and total_steps != stage_total:
             logging.warning(
-                "Patch total_steps=%d disagrees with stage sum=%d; use the stage sum",
+                "Fuse total_steps=%d disagrees with stage sum=%d; use the stage sum",
                 total_steps,
                 stage_total,
             )
             total_steps = stage_total
         if total_steps < 0:
             raise ValueError(f"total_steps must be >= 0, got {total_steps}")
-        if anchor_views_per_step <= 0 or patch_views_per_step <= 0:
-            raise ValueError("anchor_views_per_step and patch_views_per_step must be > 0")
+        if anchor_views_per_step <= 0 or fuse_views_per_step <= 0:
+            raise ValueError("anchor_views_per_step and fuse_views_per_step must be > 0")
 
         device = anchor_s2d.rgb.device
         d_flag = d_model is not None
@@ -1369,10 +1369,10 @@ class DynReconstructionSolver:
         sup_mask_type = "all" if d_flag else "static"
         if d_flag and reg_radius is None:
             reg_radius = int(np.array(temporal_diff_shift).max()) * 2
-            logging.info("Set reg_radius=%d for patch fit", reg_radius)
+            logging.info("Set reg_radius=%d for fuse fit", reg_radius)
 
         for param in anchor_cams.parameters():
-            param.requires_grad_(False) # fix the camera for patch fit, only optimize the model
+            param.requires_grad_(False) # fix the camera for fuse fit, only optimize the model
         s_model.train()
         if d_flag:
             d_model.train()
@@ -1474,7 +1474,7 @@ class DynReconstructionSolver:
             replace = count > T
             return np.random.choice(T, count, replace=replace).tolist()
 
-        def plot_patch_losses(loss_pack):
+        def plot_fuse_losses(loss_pack):
             if len(loss_pack["total"]) == 0:
                 return
             fig = plt.figure(figsize=(24, 8))
@@ -1483,7 +1483,7 @@ class DynReconstructionSolver:
                 ("anchor_rgb", loss_pack["anchor_rgb"]),
                 ("anchor_dep", loss_pack["anchor_dep"]),
                 ("anchor_track", loss_pack["anchor_track"]),
-                ("patch_rgb", loss_pack["patch_rgb"]),
+                ("fuse_rgb", loss_pack["fuse_rgb"]),
                 ("arap_coord", loss_pack["arap_coord"]),
                 ("arap_len", loss_pack["arap_len"]),
                 ("vel_xyz", loss_pack["vel_xyz"]),
@@ -1508,7 +1508,7 @@ class DynReconstructionSolver:
             "anchor_rgb": [],
             "anchor_dep": [],
             "anchor_track": [],
-            "patch_rgb": [],
+            "fuse_rgb": [],
             "arap_coord": [],
             "arap_len": [],
             "vel_xyz": [],
@@ -1574,12 +1574,12 @@ class DynReconstructionSolver:
 
             anchor_render_dict_list = []
             anchor_corr_render_dict_list = []
-            patch_render_dict_list = []
+            fuse_render_dict_list = []
 
             zero = anchor_s2d.rgb.new_tensor(0.0)
             loss_anchor_rgb = zero.clone()
             loss_anchor_dep = zero.clone()
-            loss_patch_rgb = zero.clone()
+            loss_fuse_rgb = zero.clone()
             loss_mask = zero.clone()
             loss_track = zero.clone()
             loss_nrm = zero.clone()
@@ -1723,35 +1723,35 @@ class DynReconstructionSolver:
                     pred_mask = render_mask["rgb"].permute(1, 2, 0)
                     loss_mask = loss_mask + torch.nn.functional.mse_loss(pred_mask, gt_mask)
 
-            patch_view_ind_list = select_view_indices(patch_seq.T, patch_views_per_step)
-            for patch_index in patch_view_ind_list:
-                model_tid = int(patch_seq.model_tids[patch_index].item())
+            fuse_view_ind_list = select_view_indices(fuse_seq.T, fuse_views_per_step)
+            for fuse_index in fuse_view_ind_list:
+                model_tid = int(fuse_seq.model_tids[fuse_index].item())
                 gs5 = [list(s_model())]
                 if d_flag:
                     gs5.append(list(d_model(model_tid)))
                 bg_color = np.random.rand(3).tolist() if random_bg else default_bg_color
                 if GS_BACKEND in ["natie_add3"]:
                     bg_color += [0.0, 0.0, 0.0]
-                patch_render_dict = render(
+                fuse_render_dict = render(
                     gs5,
-                    patch_seq.H,
-                    patch_seq.W,
-                    patch_seq.K,
-                    convert_single_T_wc_to_T_cw(patch_seq.T_wc[patch_index]),
+                    fuse_seq.H,
+                    fuse_seq.W,
+                    fuse_seq.K,
+                    convert_single_T_wc_to_T_cw(fuse_seq.T_wc[fuse_index]),
                     bg_color=bg_color,
                 )
-                patch_render_dict_list.append(patch_render_dict)
-                _l_patch_rgb, _, _, _, patch_extra_losses = (
-                    compute_fixed_camera_rgb_branch_loss(
-                        patch_seq,
-                        patch_index,
-                        patch_render_dict,
-                        ssim_lambda=patch_rgb_ssim_lambda,
+                fuse_render_dict_list.append(fuse_render_dict)
+                _l_fuse_rgb, _, _, _, fuse_extra_losses = (
+                    compute_fixed_camera_fuse_rgb_loss(
+                        fuse_seq,
+                        fuse_index,
+                        fuse_render_dict,
+                        ssim_lambda=fuse_rgb_ssim_lambda,
                     )
                 )
-                loss_patch_rgb = loss_patch_rgb + _l_patch_rgb
-                loss_patch_rgb = loss_patch_rgb + patch_extra_losses["dep"] * 0.0
-                loss_patch_rgb = loss_patch_rgb + patch_extra_losses["track"] * 0.0
+                loss_fuse_rgb = loss_fuse_rgb + _l_fuse_rgb
+                loss_fuse_rgb = loss_fuse_rgb + fuse_extra_losses["dep"] * 0.0
+                loss_fuse_rgb = loss_fuse_rgb + fuse_extra_losses["track"] * 0.0
 
             if len(anchor_view_ind_list) > 0:
                 norm = float(len(anchor_view_ind_list))
@@ -1762,8 +1762,8 @@ class DynReconstructionSolver:
                 loss_nrm = loss_nrm / norm
                 loss_dep_nrm_reg = loss_dep_nrm_reg / norm
                 loss_distortion_reg = loss_distortion_reg / norm
-            if len(patch_view_ind_list) > 0:
-                loss_patch_rgb = loss_patch_rgb / float(len(patch_view_ind_list))
+            if len(fuse_view_ind_list) > 0:
+                loss_fuse_rgb = loss_fuse_rgb / float(len(fuse_view_ind_list))
 
             if d_flag:
                 reg_anchor_tid = anchor_view_ind_list[0]
@@ -1815,7 +1815,7 @@ class DynReconstructionSolver:
                     + loss_dep_nrm_reg * lambda_depth_normal
                     + loss_distortion_reg * lambda_distortion
                 ) # existing dynamic reconstruction loss on anchor views
-                + patch_rgb_weight * loss_patch_rgb # photometric loss on new patch views
+                + fuse_rgb_weight * loss_fuse_rgb # photometric loss on new fuse views
                 + loss_arap_coord * lambda_arap_coord # Geometric regularizations
                 + loss_arap_len * lambda_arap_len
                 + loss_vel_xyz_reg * lambda_vel_xyz_reg
@@ -1836,12 +1836,12 @@ class DynReconstructionSolver:
                     step in d_gs_ctrl_cfg.reset_steps
                     or step in s_gs_ctrl_cfg.reset_steps
                 ) and corr_flag:
-                    logging.info("Reset event happened during patch stage-3, protect tracking loss")
+                    logging.info("Reset event happened during fuse stage-3, protect tracking loss")
                     latest_track_event = step
 
-                if len(patch_render_dict_list) > 0:
+                if len(fuse_render_dict_list) > 0:
                     apply_gs_control(
-                        render_list=patch_render_dict_list,
+                        render_list=fuse_render_dict_list,
                         model=s_model,
                         gs_control_cfg=s_gs_ctrl_cfg,
                         step=step,
@@ -1850,7 +1850,7 @@ class DynReconstructionSolver:
                     )
                     if d_flag:
                         apply_gs_control(
-                            render_list=patch_render_dict_list,
+                            render_list=fuse_render_dict_list,
                             model=d_model,
                             gs_control_cfg=d_gs_ctrl_cfg,
                             step=step,
@@ -1868,7 +1868,7 @@ class DynReconstructionSolver:
             loss_pack["anchor_rgb"].append(loss_anchor_rgb.item())
             loss_pack["anchor_dep"].append(loss_anchor_dep.item())
             loss_pack["anchor_track"].append(loss_track.item())
-            loss_pack["patch_rgb"].append(loss_patch_rgb.item())
+            loss_pack["fuse_rgb"].append(loss_fuse_rgb.item())
             loss_pack["arap_coord"].append(loss_arap_coord.item())
             loss_pack["arap_len"].append(loss_arap_len.item())
             loss_pack["vel_xyz"].append(loss_vel_xyz_reg.item())
@@ -1883,7 +1883,7 @@ class DynReconstructionSolver:
             if viz_cheap_interval > 0 and (
                 step % viz_cheap_interval == 0 or step == total_steps - 1
             ):
-                plot_patch_losses(loss_pack)
+                plot_fuse_losses(loss_pack)
 
         s_save_fn = osp.join(self.log_dir, f"{phase_name}_s_model_{GS_BACKEND.lower()}.pth")
         torch.save(s_model.state_dict(), s_save_fn)
@@ -1894,7 +1894,7 @@ class DynReconstructionSolver:
             )
             torch.save(d_model.state_dict(), d_save_fn)
 
-        plot_patch_losses(loss_pack)
+        plot_fuse_losses(loss_pack)
         if total_steps > 0:
             viz2d_total_video(
                 viz_vid_fn=osp.join(self.log_dir, f"{phase_name}_2dviz.mp4"),

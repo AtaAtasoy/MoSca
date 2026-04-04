@@ -41,6 +41,36 @@ def load_rgb_frames_from_dir(rgb_dir):
     return rgb, frame_names
 
 
+def load_binary_masks_from_dir(mask_dir, frame_names):
+    assert osp.isdir(mask_dir), f"Mask directory not found: {mask_dir}"
+    mask_fns = [
+        fn
+        for fn in os.listdir(mask_dir)
+        if fn.lower().endswith(".png") or fn.lower().endswith(".jpg")
+    ]
+    mask_fns = sorted(mask_fns)
+    assert len(mask_fns) > 0, f"No mask frames found under {mask_dir}"
+    if len(mask_fns) != len(frame_names):
+        raise ValueError(
+            f"RGB/mask length mismatch: {len(frame_names)} RGB frames vs {len(mask_fns)} masks under {mask_dir}"
+        )
+
+    masks = []
+    for mask_fn in mask_fns:
+        mask = imageio.imread(osp.join(mask_dir, mask_fn))
+        if mask.ndim == 3:
+            mask = mask[..., 0]
+        masks.append(mask > 127) # 
+
+    masks = np.stack(masks, 0)
+    H, W = masks.shape[1:3]
+    assert (
+        masks.ndim == 3
+    ), f"Expected mask frames shaped (T,H,W), got {masks.shape}"
+    assert all(mask.shape == (H, W) for mask in masks), "Mask frames must share one resolution"
+    return torch.from_numpy(masks).bool()
+
+
 class FixedCameraRGBSequence:
     def __init__(
         self,
@@ -51,6 +81,7 @@ class FixedCameraRGBSequence:
         normalization_params_path=None,
         normalization_mode="normalized_to_raw",
         prior_ws=None,
+        dynamic_mask_dir=None,
     ):
         self.name = name
         self.rgb_dir = rgb_dir
@@ -59,6 +90,7 @@ class FixedCameraRGBSequence:
         self.normalization_params_path = normalization_params_path
         self.normalization_mode = normalization_mode
         self.prior_ws = prior_ws
+        self.dynamic_mask_dir = dynamic_mask_dir
 
         rgb, frame_names = load_rgb_frames_from_dir(rgb_dir)
         priors = load_vipe_camera_priors(
@@ -99,11 +131,21 @@ class FixedCameraRGBSequence:
         if prior_ws is not None and not osp.isdir(prior_ws):
             raise FileNotFoundError(f"gen3c_prior_ws not found: {prior_ws}")
 
+        if dynamic_mask_dir is not None:
+            dynamic_masks = load_binary_masks_from_dir(dynamic_mask_dir, frame_names)
+            if dynamic_masks.shape[1:3] != rgb.shape[1:3]:
+                raise ValueError(
+                    f"Mask/RGB resolution mismatch: {dynamic_masks.shape[1:3]} vs {rgb.shape[1:3]}"
+                )
+        else:
+            dynamic_masks = None
+
         self.rgb = rgb
         self.frame_names = frame_names
         self.T_wc = T_wc.float()
         self.K = K.float()
         self.model_tids = inds.long()
+        self.dynamic_masks = dynamic_masks
         self.optional_priors = {}
         self.has_optional_priors = False
 
@@ -119,6 +161,12 @@ class FixedCameraRGBSequence:
             logging.info(
                 "Optional prior workspace is configured at %s but RGB-only losses remain active until prior hooks are enabled",
                 prior_ws,
+            )
+        if dynamic_mask_dir is not None:
+            logging.info(
+                "Loaded dynamic masks for fixed-camera RGB sequence '%s' from %s; fuse RGB loss will supervise only non-dynamic pixels",
+                self.name,
+                dynamic_mask_dir,
             )
 
     @property
@@ -138,13 +186,19 @@ class FixedCameraRGBSequence:
         self.T_wc = self.T_wc.to(device)
         self.K = self.K.to(device)
         self.model_tids = self.model_tids.to(device)
+        if self.dynamic_masks is not None:
+            self.dynamic_masks = self.dynamic_masks.to(device)
         for key, value in self.optional_priors.items():
             if torch.is_tensor(value):
                 self.optional_priors[key] = value.to(device)
         return self
 
     def get_rgb_mask(self, index):
-        return torch.ones(self.H, self.W, dtype=torch.bool, device=self.rgb.device)
+        if self.dynamic_masks is None:
+            return torch.ones(self.H, self.W, dtype=torch.bool, device=self.rgb.device)
+        # White pixels in the user-provided masks denote dynamic foreground, so
+        # supervision keeps only the complementary static region.
+        return ~self.dynamic_masks[index]
 
     def save_camera_npz(self, save_path):
         np.savez(

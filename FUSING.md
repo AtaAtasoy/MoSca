@@ -1,15 +1,15 @@
-# Patch Training
+# Fuse Training
 
-This document describes the current fixed-camera gen3c patch-training workflow implemented in:
+This document describes the current fixed-camera gen3c fuse-training workflow implemented in:
 
-- [mosca_patch.py](/home/atasoy/MoSca/mosca_patch.py)
+- [mosca_fuse.py](/home/atasoy/MoSca/mosca_fuse.py)
 - [lib_mosca/photo_recon.py](/home/atasoy/MoSca/lib_mosca/photo_recon.py)
 - [data_utils/fixed_camera_sequence.py](/home/atasoy/MoSca/data_utils/fixed_camera_sequence.py)
 - [render_experiment.py](/home/atasoy/MoSca/render_experiment.py)
 
 ## Goal
 
-Patch an already trained MoSca `photometric` run with a second posed video source, while:
+Fuse an already trained MoSca `photometric` run with a second posed video source, while:
 
 - keeping all cameras fixed
 - preserving the original MoSca training set as the anchor supervision branch
@@ -34,11 +34,11 @@ The intended use case is:
 
 ## High-Level Flow
 
-`mosca_patch.py` does the following:
+`mosca_fuse.py` does the following:
 
-1. Loads the base fit config and merges it with a patch config YAML.
-2. Creates a new patch output directory under:
-   - `<base_logdir>/patches/<patch_name>_<timestamp>/`
+1. Loads the base fit config and merges it with a fuse config YAML.
+2. Creates a new fuse output directory under:
+   - `<base_logdir>/fusions/<fuse_name>_<timestamp>/`
 3. Loads the anchor MoSca state from the finished run:
    - `photometric_cam.pth`
    - `photometric_s_model_<backend>.pth`
@@ -47,41 +47,41 @@ The intended use case is:
    - the original `Saved2D` workspace data from `base_ws`
 4. Loads the gen3c sequence through `FixedCameraRGBSequence`.
 5. Optionally renders `preview_before`.
-6. Runs `DynReconstructionSolver.patch_photometric_fit(...)`.
-7. Saves patched checkpoints under the configured phase name, currently `patch_gen3c`.
+6. Runs `DynReconstructionSolver.fuse_photometric_fit(...)`.
+7. Saves fused checkpoints under the configured phase name, currently `fuse_gen3c`.
 8. Optionally renders `preview_after`.
 
 ## How To Launch
 
-The patch entrypoint is:
+The fuse entrypoint is:
 
 ```bash
-python mosca_patch.py --cfg <patch_yaml>
+python mosca_fuse.py --cfg <fuse_yaml>
 ```
 
 Typical usage from the repo root:
 
 ```bash
 source .venv/bin/activate
-python mosca_patch.py --cfg profile/vipe/cowboy_cat_patch_gen3c.yaml
+python mosca_fuse.py --cfg profile/vipe/cowboy_cat_fuse_gen3c.yaml
 ```
 
 If needed, you can choose a device explicitly:
 
 ```bash
 source .venv/bin/activate
-python mosca_patch.py \
-  --cfg profile/vipe/cowboy_cat_patch_gen3c.yaml \
+python mosca_fuse.py \
+  --cfg profile/vipe/cowboy_cat_fuse_gen3c.yaml \
   --device cuda:0
 ```
 
-The patch run creates a fresh output directory under:
+The fuse run creates a fresh output directory under:
 
 ```text
-<base_logdir>/patches/<patch_name>_<timestamp>/
+<base_logdir>/fusions/<fuse_name>_<timestamp>/
 ```
 
-So patching is non-destructive with respect to the original finished MoSca run.
+So fusing is non-destructive with respect to the original finished MoSca run.
 
 ## Launch In Tmux
 
@@ -90,28 +90,28 @@ For long runs, launch inside `tmux`.
 Example:
 
 ```bash
-tmux new-session -d -s cowboy_cat_gen3c_patch \
+tmux new-session -d -s cowboy_cat_gen3c_fuse \
   'cd /home/atasoy/MoSca && \
-   export MPLCONFIGDIR=/tmp/matplotlib-cowboy-cat-patch && \
+   export MPLCONFIGDIR=/tmp/matplotlib-cowboy-cat-fuse && \
    source /home/atasoy/MoSca/.venv/bin/activate && \
-   python mosca_patch.py \
-     --cfg /home/atasoy/MoSca/profile/vipe/cowboy_cat_patch_gen3c.yaml \
-     > /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/patch_launch.log 2>&1'
+   python mosca_fuse.py \
+     --cfg /home/atasoy/MoSca/profile/vipe/cowboy_cat_fuse_gen3c.yaml \
+     > /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/fuse_launch.log 2>&1'
 ```
 
 Useful monitoring commands:
 
 ```bash
-tail -f /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/patch_launch.log
+tail -f /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/fuse_launch.log
 ```
 
 ```bash
-ps -ef | grep '[p]ython mosca_patch.py'
+ps -ef | grep '[p]ython mosca_fuse.py'
 ```
 
-## Required Patch Config Fields
+## Required Fuse Config Fields
 
-At minimum, the patch YAML should define:
+At minimum, the fuse YAML should define:
 
 - `base_logdir`
 - `base_ws`
@@ -123,25 +123,25 @@ At minimum, the patch YAML should define:
 
 Important optional fields:
 
-- `patch_name`
-- `patch_phase_name`
+- `fuse_name`
+- `fuse_phase_name`
 - `gen3c_normalization_mode`
 - `gen3c_prior_ws`
-- stage lengths and patch loss weights
+- stage lengths and fuse loss weights
 
 ## What The Config Controls
 
-The merged patch config is:
+The merged fuse config is:
 
 - base MoSca fit config
-- overridden or extended by the patch YAML
+- overridden or extended by the fuse YAML
 
 In practice this means:
 
 - the base fit config still controls most original MoSca reconstruction losses and defaults
-- the patch YAML adds patch-specific inputs and patch-specific optimization knobs
+- the fuse YAML adds fuse-specific inputs and fuse-specific optimization knobs
 
-This is why `mosca_patch.py` takes only one user-facing `--cfg`: that YAML is merged with the base training config before patching starts.
+This is why `mosca_fuse.py` takes only one user-facing `--cfg`: that YAML is merged with the base training config before fusing starts.
 
 ## Gen3c Input Loading
 
@@ -179,19 +179,19 @@ Validation currently enforced:
 Optional prior support:
 
 - The class already has placeholders for future optional priors.
-- Today, these hooks are not consumed by patch training.
-- Even if `gen3c_prior_ws` is set, the current patch fit remains RGB-only on the gen3c branch.
+- Today, these hooks are not consumed by fuse training.
+- Even if `gen3c_prior_ws` is set, the current fuse fit remains RGB-only on the gen3c branch.
 
 ## Optimization Structure
 
-Patch fitting happens inside `DynReconstructionSolver.patch_photometric_fit(...)`.
+Fuse fitting happens inside `DynReconstructionSolver.fuse_photometric_fit(...)`.
 
 Two supervision branches are mixed every training step:
 
 - Anchor branch:
   - samples original MoSca views from the base workspace
   - uses the existing MoSca photometric and regularization logic
-- Patch branch:
+- Fuse branch:
   - samples fixed gen3c views
   - renders the current scene from the supplied gen3c `T_wc`
   - compares render against gen3c RGB
@@ -199,10 +199,10 @@ Two supervision branches are mixed every training step:
 By default:
 
 - `anchor_views_per_step = 1`
-- `patch_views_per_step = 1`
+- `fuse_views_per_step = 1`
 - `anchor_weight = 1.0`
-- `patch_rgb_weight = 1.0`
-- `patch_gen3c_rgb_ssim_lambda = 0.1`
+- `fuse_rgb_weight = 1.0`
+- `fuse_gen3c_rgb_ssim_lambda = 0.1`
 
 Camera learning rates are forced to zero:
 
@@ -210,11 +210,11 @@ Camera learning rates are forced to zero:
 - `lr_cam_q = 0.0`
 - `lr_cam_t = 0.0`
 
-So the patch job does not optimize cameras.
+So the fuse job does not optimize cameras.
 
 ## Stage Schedule
 
-The current patch schedule is three-stage:
+The current fuse schedule is three-stage:
 
 1. Stage 1: appearance-only stabilization
    - default `1000` steps
@@ -227,7 +227,7 @@ The current patch schedule is three-stage:
      - `stage2_geo_lr_scale = 0.25`
      - `stage2_node_lr_scale = 0.25`
      - `stage2_node_sigma_lr_scale = 0.25`
-3. Stage 3: full patch refinement
+3. Stage 3: full fuse refinement
    - default `1000` steps
    - geometry and scaffold/node learning rates return to full scale
    - defaults:
@@ -235,7 +235,7 @@ The current patch schedule is three-stage:
      - `stage3_node_lr_scale = 1.0`
      - `stage3_node_sigma_lr_scale = 1.0`
 
-GS control is also active during patching, with separate static and dynamic settings for:
+GS control is also active during fusing, with separate static and dynamic settings for:
 
 - densify
 - prune
@@ -248,12 +248,12 @@ Anchor branch:
 - keeps the original MoSca training losses and regularization active
 - includes the same RGB, depth, track, temporal, distortion, ARAP, and velocity/acceleration terms configured by the merged fit config
 
-Gen3c patch branch:
+Gen3c fuse branch:
 
 - currently RGB-only
 - uses a photometric loss built from:
   - RGB reconstruction
-  - SSIM mixing controlled by `patch_gen3c_rgb_ssim_lambda`
+  - SSIM mixing controlled by `fuse_gen3c_rgb_ssim_lambda`
 
 Not currently used on the gen3c branch:
 
@@ -262,31 +262,31 @@ Not currently used on the gen3c branch:
 - TAP / track losses
 - prior masks
 
-The code is intentionally structured so those can be added later without changing the fixed-camera patch architecture.
+The code is intentionally structured so those can be added later without changing the fixed-camera fuse architecture.
 
 ## Outputs
 
-For `patch_phase_name: patch_gen3c`, the main saved outputs are:
+For `fuse_phase_name: fuse_gen3c`, the main saved outputs are:
 
-- `patch_gen3c_cam.pth`
-- `patch_gen3c_s_model_<backend>.pth`
-- `patch_gen3c_d_model_<backend>.pth`
-- `patch_gen3c_input_cameras.npz`
-- `patch_gen3c_optim_loss.jpg`
+- `fuse_gen3c_cam.pth`
+- `fuse_gen3c_s_model_<backend>.pth`
+- `fuse_gen3c_d_model_<backend>.pth`
+- `fuse_gen3c_input_cameras.npz`
+- `fuse_gen3c_optim_loss.jpg`
 - preview renders under:
   - `preview_before/`
   - `preview_after/`
 - visualization videos such as:
-  - `patch_gen3c_2dviz_0.mp4`
-  - `patch_gen3c_3Dviz_0.mp4`
+  - `fuse_gen3c_2dviz_0.mp4`
+  - `fuse_gen3c_3Dviz_0.mp4`
 
-The patch output directory also stores:
+The fuse output directory also stores:
 
-- merged patch config
+- merged fuse config
 - command-line args
 - dynamic reconstruction log
 
-## Rendering Patched Checkpoints
+## Rendering Fused Checkpoints
 
 `render_experiment.py` now supports alternate checkpoint families through:
 
@@ -296,22 +296,22 @@ Default behavior remains:
 
 - `--checkpoint_prefix photometric`
 
-Patched runs can now be rendered with:
+Fused runs can now be rendered with:
 
-- `--checkpoint_prefix patch_gen3c`
+- `--checkpoint_prefix fuse_gen3c`
 
 This makes the renderer load:
 
-- `patch_gen3c_cam.pth`
-- `patch_gen3c_s_model_<backend>.pth`
-- `patch_gen3c_d_model_<backend>.pth`
+- `fuse_gen3c_cam.pth`
+- `fuse_gen3c_s_model_<backend>.pth`
+- `fuse_gen3c_d_model_<backend>.pth`
 
 Example:
 
 ```bash
 python render_experiment.py \
-  --logdir runs/.../patches/cowboy_cat_gen3c_patch_<timestamp> \
-  --checkpoint_prefix patch_gen3c \
+  --logdir runs/.../fusions/cowboy_cat_gen3c_fuse_<timestamp> \
+  --checkpoint_prefix fuse_gen3c \
   --camera_set test \
   --region full \
   --test_camera_name gen3c_current_npz \
@@ -323,11 +323,11 @@ python render_experiment.py \
 
 ## Cowboy-Cat Reference Run
 
-The current reference patch config is:
+The current reference fuse config is:
 
-- [profile/vipe/cowboy_cat_patch_gen3c.yaml](/home/atasoy/MoSca/profile/vipe/cowboy_cat_patch_gen3c.yaml)
+- [profile/vipe/cowboy_cat_fuse_gen3c.yaml](/home/atasoy/MoSca/profile/vipe/cowboy_cat_fuse_gen3c.yaml)
 
-It patches this finished base run:
+It fusions this finished base run:
 
 - [cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850](/home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850)
 
@@ -341,33 +341,33 @@ And this normalization JSON:
 
 - [normalization_params.json](/home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/normalization_params.json)
 
-The produced patch run is:
+The produced fuse run is:
 
-- [cowboy_cat_gen3c_patch_20260401_235730](/home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/patches/cowboy_cat_gen3c_patch_20260401_235730)
+- [cowboy_cat_gen3c_fuse_20260401_235730](/home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/fusions/cowboy_cat_gen3c_fuse_20260401_235730)
 
 The exact launch command used for that run was:
 
 ```bash
 source /home/atasoy/MoSca/.venv/bin/activate
-python /home/atasoy/MoSca/mosca_patch.py \
-  --cfg /home/atasoy/MoSca/profile/vipe/cowboy_cat_patch_gen3c.yaml
+python /home/atasoy/MoSca/mosca_fuse.py \
+  --cfg /home/atasoy/MoSca/profile/vipe/cowboy_cat_fuse_gen3c.yaml
 ```
 
 And the `tmux` launch command used in practice was:
 
 ```bash
-tmux new-session -d -s cowboy_cat_gen3c_patch \
+tmux new-session -d -s cowboy_cat_gen3c_fuse \
   'cd /home/atasoy/MoSca && \
-   export MPLCONFIGDIR=/tmp/matplotlib-cowboy-cat-patch && \
+   export MPLCONFIGDIR=/tmp/matplotlib-cowboy-cat-fuse && \
    source /home/atasoy/MoSca/.venv/bin/activate && \
-   python mosca_patch.py \
-     --cfg /home/atasoy/MoSca/profile/vipe/cowboy_cat_patch_gen3c.yaml \
-     > /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/patch_launch.log 2>&1'
+   python mosca_fuse.py \
+     --cfg /home/atasoy/MoSca/profile/vipe/cowboy_cat_fuse_gen3c.yaml \
+     > /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850/fuse_launch.log 2>&1'
 ```
 
 ## Known Issue
 
-The training run completed and saved patch checkpoints, but `mosca_patch.py` currently has a small post-run bug in `max_camera_state_delta(...)`.
+The training run completed and saved fuse checkpoints, but `mosca_fuse.py` currently has a small post-run bug in `max_camera_state_delta(...)`.
 
 Problem:
 
@@ -379,4 +379,4 @@ Effect:
 - the run crashes after training during final bookkeeping
 - `camera_freeze_check.txt` is not written
 
-This does not affect the actual patch checkpoints. In the reference run, the saved patched camera checkpoint was manually verified to be identical to the base camera checkpoint.
+This does not affect the actual fuse checkpoints. In the reference run, the saved fused camera checkpoint was manually verified to be identical to the base camera checkpoint.

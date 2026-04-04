@@ -39,7 +39,7 @@ def parse_args():
         "--checkpoint_prefix",
         type=str,
         default="photometric",
-        help="Checkpoint prefix to load, e.g. photometric or patch_gen3c",
+        help="Checkpoint prefix to load, e.g. photometric or fuse_gen3c",
     )
     parser.add_argument(
         "--cfg",
