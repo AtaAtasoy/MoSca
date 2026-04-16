@@ -9,6 +9,7 @@ import subprocess
 import imageio
 import numpy as np
 import torch
+from matplotlib import cm
 from omegaconf import OmegaConf
 
 from data_utils.known_camera_helpers import (
@@ -82,6 +83,12 @@ def parse_args():
         "--skip_video",
         action="store_true",
         help="Only save PNG frames, skip ffmpeg mp4/gif generation",
+    )
+    parser.add_argument(
+        "--occupancy_threshold",
+        type=float,
+        default=1e-3,
+        help="Alpha threshold used to convert the renderer's soft coverage into a binary occupancy mask",
     )
     parser.add_argument(
         "--test_camera_pose_path",
@@ -301,6 +308,39 @@ def save_rgb_frame(save_fn, rgb):
     imageio.imwrite(save_fn, (rgb * 255.0).astype(np.uint8))
 
 
+def save_depth_frame(save_fn, depth):
+    np.savez_compressed(save_fn, dep=depth.astype(np.float32))
+
+
+def save_mask_frame(save_fn, mask):
+    imageio.imwrite(save_fn, (mask.astype(np.uint8) * 255))
+
+
+def colorize_depth_frames(depth_list, viz_quantile=3.0):
+    dep_stack = np.stack(depth_list, axis=0).astype(np.float32)
+    valid_mask = np.isfinite(dep_stack) & (dep_stack > 1e-6)
+
+    if not np.any(valid_mask):
+        return [np.zeros(depth.shape + (3,), dtype=np.uint8) for depth in depth_list]
+
+    dep_values = dep_stack[valid_mask]
+    dep_max = np.percentile(dep_values, 100.0 - viz_quantile)
+    dep_min = np.percentile(dep_values, viz_quantile)
+    if not np.isfinite(dep_min) or not np.isfinite(dep_max) or dep_max <= dep_min:
+        dep_min = float(dep_values.min())
+        dep_max = float(dep_values.max())
+
+    denom = max(dep_max - dep_min, 1e-6)
+    dep_norm = np.clip((dep_stack - dep_min) / denom, 0.0, 1.0)
+    dep_norm[~valid_mask] = 0.0
+
+    viz_list = []
+    for dep in dep_norm:
+        viz = cm.viridis(dep)[..., :3]
+        viz_list.append((viz * 255.0).astype(np.uint8))
+    return viz_list
+
+
 def run_ffmpeg(cmd):
     logging.info("Running ffmpeg: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
@@ -376,12 +416,20 @@ def render_sequence(
     bg_color,
     fps,
     skip_video,
+    occupancy_threshold,
 ):
     os.makedirs(save_root, exist_ok=True)
     frame_dir = osp.join(save_root, "frames")
+    depth_dir = osp.join(save_root, "depth")
+    depth_viz_dir = osp.join(save_root, "depth_viz")
+    occupancy_dir = osp.join(save_root, "occupancy")
     os.makedirs(frame_dir, exist_ok=True)
+    os.makedirs(depth_dir, exist_ok=True)
+    os.makedirs(depth_viz_dir, exist_ok=True)
+    os.makedirs(occupancy_dir, exist_ok=True)
 
     T_cw_list = convert_T_wc_to_T_cw(T_wc_list, device=K.device, dtype=K.dtype)
+    depth_frames = []
     for frame_idx, (T_cw, model_tid) in enumerate(zip(T_cw_list, model_tids)):
         render_dict = render(
             get_render_payload(region, s_model, d_model, int(model_tid)),
@@ -392,10 +440,35 @@ def render_sequence(
             bg_color=bg_color,
         )
         rgb = render_dict["rgb"].permute(1, 2, 0).detach().cpu().numpy()
+        depth = render_dict["dep"]
+        if depth is None:
+            raise RuntimeError(
+                "The active renderer did not return depth. Depth export requires a "
+                "backend that populates render_dict['dep']."
+            )
+        alpha = render_dict["alpha"]
+        if alpha is None:
+            raise RuntimeError(
+                "The active renderer did not return alpha. Occupancy export requires a "
+                "backend that populates render_dict['alpha']."
+            )
+        depth = depth.squeeze().detach().cpu().numpy()
+        occupancy = (
+            alpha.squeeze().detach().cpu().numpy() >= float(occupancy_threshold)
+        )
         save_rgb_frame(osp.join(frame_dir, f"{frame_idx:05d}.png"), rgb)
+        save_depth_frame(osp.join(depth_dir, f"{frame_idx:05d}.npz"), depth)
+        save_mask_frame(osp.join(occupancy_dir, f"{frame_idx:05d}.png"), occupancy)
+        depth_frames.append(depth)
+
+    depth_viz_frames = colorize_depth_frames(depth_frames)
+    for frame_idx, depth_viz in enumerate(depth_viz_frames):
+        imageio.imwrite(osp.join(depth_viz_dir, f"{frame_idx:05d}.png"), depth_viz)
 
     if not skip_video:
         build_video_outputs(frame_dir, fps=fps, stem=sequence_name)
+        build_video_outputs(depth_viz_dir, fps=fps, stem=f"{sequence_name}_depth_viz")
+        build_video_outputs(occupancy_dir, fps=fps, stem=f"{sequence_name}_occupancy")
 
 
 def get_train_sequence(cams):
@@ -598,6 +671,7 @@ def main():
                 bg_color=args.bg_color,
                 fps=args.fps,
                 skip_video=args.skip_video,
+                occupancy_threshold=args.occupancy_threshold,
             )
 
     if args.camera_set in ["test", "both"]:
@@ -618,6 +692,7 @@ def main():
                 bg_color=args.bg_color,
                 fps=args.fps,
                 skip_video=args.skip_video,
+                occupancy_threshold=args.occupancy_threshold,
             )
 
     logging.info("Finished rendering. Outputs saved to %s", savedir)

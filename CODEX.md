@@ -241,7 +241,7 @@ The `cowboy_cat_fit_init.yaml` profile initializes MoCa from external VIPE camer
 - `known_camera_intrinsics_path`
 
 The checked-in cowboy-cat VIPE profiles use the scene-style export bundle under
-`/home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter`:
+`/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/di35dov/monst3r/demo_tmp/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter`:
 
 - depth maps: `frame_####.npy`
 - camera trajectory: `pred_traj.txt`

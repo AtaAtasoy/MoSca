@@ -42,6 +42,12 @@ def parse_args():
     parser.add_argument(
         "--device", type=str, default="cuda:0", help="Torch device for fuse fitting"
     )
+    parser.add_argument(
+        "--resume-logdir",
+        type=str,
+        default=None,
+        help="Existing fuse logdir to resume from",
+    )
     return parser.parse_args()
 
 
@@ -89,7 +95,12 @@ def load_fuse_cfg(cfg_path):
     return merged_cfg, base_fit_cfg_path
 
 
-def setup_fuse_logdir(base_logdir, cfg):
+def setup_fuse_logdir(base_logdir, cfg, resume_logdir=None):
+    if resume_logdir is not None:
+        if not osp.isdir(resume_logdir):
+            raise FileNotFoundError(f"Resume fuse logdir not found: {resume_logdir}")
+        logging.info("Resume fuse logdir: %s", resume_logdir)
+        return resume_logdir
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     fuse_name = getattr(cfg, "fuse_name", "gen3c_fuse")
     fuse_root = osp.join(base_logdir, "fusions")
@@ -102,7 +113,15 @@ def setup_fuse_logdir(base_logdir, cfg):
     return fuse_logdir
 
 
-def load_anchor_fuse_state(base_ws, base_logdir, fit_cfg, fuse_logdir, device):
+def load_anchor_fuse_state(
+    base_ws,
+    base_logdir,
+    fit_cfg,
+    fuse_logdir,
+    device,
+    phase_name="fuse_gen3c",
+    resume_logdir=None,
+):
     policy = log_geometry_policy(fit_cfg, prefix="Fuse anchor geometry policy")
     depth_dir, tap_mode = auto_get_depth_dir_tap_mode(base_ws, fit_cfg)
     depth_boundary_th = getattr(fit_cfg, "depth_boundary_th", 1.0)
@@ -139,22 +158,39 @@ def load_anchor_fuse_state(base_ws, base_logdir, fit_cfg, fuse_logdir, device):
         torch.from_numpy(track_identification["dynamic_track_mask"]).to(device),
     )
 
-    cam_path = osp.join(base_logdir, "photometric_cam.pth")
-    if not osp.exists(cam_path):
-        cam_path = osp.join(base_logdir, "bundle", "bundle_cams.pth")
-    cams = MonocularCameras.load_from_ckpt(
-        torch.load(cam_path, map_location="cpu")
-    ).to(device)
+    resume_cam_path = None
+    resume_s_model_path = None
+    resume_d_model_path = None
+    if resume_logdir is not None:
+        resume_cam_path = osp.join(resume_logdir, f"{phase_name}_cam.pth")
+        resume_s_model_path = osp.join(
+            resume_logdir, f"{phase_name}_s_model_{GS_BACKEND.lower()}.pth"
+        )
+        resume_d_model_path = osp.join(
+            resume_logdir, f"{phase_name}_d_model_{GS_BACKEND.lower()}.pth"
+        )
+        if not osp.exists(resume_cam_path) or not osp.exists(resume_s_model_path):
+            raise FileNotFoundError(
+                "Resume requested but fused camera/static checkpoints are missing in "
+                f"{resume_logdir}"
+            )
 
+    cam_path = resume_cam_path or osp.join(base_logdir, "photometric_cam.pth")
+    if resume_cam_path is None and not osp.exists(cam_path):
+        cam_path = osp.join(base_logdir, "bundle", "bundle_cams.pth")
+    cams = MonocularCameras.load_from_ckpt(torch.load(cam_path, map_location="cpu")).to(device)
+
+    s_model_path = resume_s_model_path or osp.join(
+        base_logdir, f"photometric_s_model_{GS_BACKEND.lower()}.pth"
+    )
     s_model = StaticGaussian.load_from_ckpt(
-        torch.load(
-            osp.join(base_logdir, f"photometric_s_model_{GS_BACKEND.lower()}.pth"),
-            map_location="cpu",
-        ),
+        torch.load(s_model_path, map_location="cpu"),
         device=device,
     ).to(device)
 
-    d_model_path = osp.join(base_logdir, f"photometric_d_model_{GS_BACKEND.lower()}.pth")
+    d_model_path = resume_d_model_path or osp.join(
+        base_logdir, f"photometric_d_model_{GS_BACKEND.lower()}.pth"
+    )
     if osp.exists(d_model_path):
         d_model = DynSCFGaussian.load_from_ckpt(
             torch.load(d_model_path, map_location="cpu"),
@@ -223,9 +259,11 @@ def max_camera_state_delta(before_state, after_state):
     for key, before_value in before_state.items():
         after_value = after_state[key]
         if torch.is_tensor(before_value):
-            delta = float(
-                (before_value - after_value.detach().cpu()).abs().max().item()
-            )
+            after_value = after_value.detach().cpu()
+            if before_value.dtype == torch.bool or after_value.dtype == torch.bool:
+                delta = float((before_value != after_value).any().item())
+            else:
+                delta = float((before_value - after_value).abs().max().item())
             max_delta = max(max_delta, delta)
     return max_delta
 
@@ -242,9 +280,14 @@ def main():
         raise ValueError("Fuse config must provide base_ws")
 
     device = torch.device(args.device)
-    fuse_logdir = setup_fuse_logdir(base_logdir, cfg)
-    with open(osp.join(fuse_logdir, "base_fit_cfg_path.txt"), "w", encoding="utf-8") as f:
-        f.write(base_fit_cfg_path)
+    resume_logdir = args.resume_logdir or getattr(cfg, "fuse_resume_logdir", None)
+    phase_name = getattr(cfg, "fuse_phase_name", "fuse_gen3c")
+    fuse_logdir = setup_fuse_logdir(base_logdir, cfg, resume_logdir=resume_logdir)
+    if resume_logdir is None:
+        with open(osp.join(fuse_logdir, "base_fit_cfg_path.txt"), "w", encoding="utf-8") as f:
+            f.write(base_fit_cfg_path)
+    else:
+        logging.info("Resume enabled from fuse logdir %s", resume_logdir)
 
     fuse_seq = FixedCameraRGBSequence(
         name=getattr(cfg, "fuse_sequence_name", "gen3c"),
@@ -264,6 +307,8 @@ def main():
         fit_cfg=cfg,
         fuse_logdir=fuse_logdir,
         device=device,
+        phase_name=phase_name,
+        resume_logdir=resume_logdir,
     )
 
     base_cam_state = {
@@ -411,7 +456,9 @@ def main():
         viz_move_angle_deg=getattr(cfg, "fuse_viz_move_angle_deg", 10.0),
         random_bg=getattr(cfg, "photo_random_bg", True),
         default_bg_color=getattr(cfg, "photo_default_bg_color", [0.0, 0.0, 0.0]),
-        phase_name=getattr(cfg, "fuse_phase_name", "fuse_gen3c"),
+        phase_name=phase_name,
+        resume_checkpoint=resume_logdir,
+        checkpoint_interval=getattr(cfg, "fuse_checkpoint_interval", 0),
     )
 
     if getattr(cfg, "fuse_save_preview_renders", True):

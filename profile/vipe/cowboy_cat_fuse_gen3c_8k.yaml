@@ -1,16 +1,17 @@
-fuse_name: cowboy_cat_gen3c_fuse
+fuse_name: cowboy_cat_gen3c_fuse_8k
 
 # Existing MoSca run to fuse
-base_logdir: /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850
-base_ws: /home/atasoy/MoSca/runs/cowboy_cat_original_scale
-base_fit_cfg: /home/atasoy/MoSca/profile/vipe/cowboy_cat_fit_fixed_scene.yaml
+base_logdir: runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850
+base_ws: runs/cowboy_cat_original_scale
+base_fit_cfg: profile/vipe/cowboy_cat_fit_fixed_scene.yaml
 
 # Fixed gen3c supervision sequence
 fuse_sequence_name: cowboy_cat_gen3c
-gen3c_rgb_dir: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/frames
-gen3c_dynamic_mask_dir: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/masks
-gen3c_pose_path: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/pose/normalized_nofilter.npz
-gen3c_intrinsics_path: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/intrinsics/normalized_nofilter.npz
+gen3c_rgb_dir: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/frames
+# gen3c_dynamic_mask_dir: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/masks
+gen3c_dynamic_mask_dir: null
+gen3c_pose_path: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/pose/normalized_nofilter.npz
+gen3c_intrinsics_path: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/intrinsics/normalized_nofilter.npz
 gen3c_normalization_params: /dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/di35dov/monst3r/demo_tmp/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/normalization_params.json
 gen3c_normalization_mode: normalized_to_raw
 

@@ -339,7 +339,7 @@ Using these gen3c inputs:
 
 And this normalization JSON:
 
-- [normalization_params.json](/home/atasoy/vipe/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/normalization_params.json)
+- [normalization_params.json](/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/di35dov/monst3r/demo_tmp/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/normalization_params.json)
 
 The produced fuse run is:
 

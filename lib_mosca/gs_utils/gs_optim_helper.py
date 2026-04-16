@@ -240,7 +240,8 @@ def replace_tensor_to_optimizer(optimizer, tensor, name):
                     stored_state["exp_avg"] = torch.zeros_like(_tensor)
                     stored_state["exp_avg_sq"] = torch.zeros_like(_tensor)
                     del optimizer.state[group["params"][0]]
-                    optimizer.state[group["params"][0]] = stored_state
                 group["params"][0] = nn.Parameter(_tensor.requires_grad_(True))
+                if stored_state is not None:
+                    optimizer.state[group["params"][0]] = stored_state
                 optimizable_tensors[group["name"]] = group["params"][0]
     return optimizable_tensors

@@ -2,6 +2,7 @@
 import sys, os, os.path as osp
 import torch
 import logging
+import shutil
 from tqdm import tqdm
 from omegaconf import OmegaConf
 from misc import configure_logging, get_timestamp
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 import kornia
 import colorsys
+import glob
 import torch.nn.functional as F
 
 sys.path.append(osp.dirname(osp.abspath(__file__)))
@@ -1346,6 +1348,8 @@ class DynReconstructionSolver:
         random_bg=False,
         default_bg_color=[1.0, 1.0, 1.0],
         phase_name="fuse_gen3c",
+        resume_checkpoint=None,
+        checkpoint_interval=0,
     ):
         logging.info("Fixed-camera fuse fit with GS-BACKEND=%s", GS_BACKEND.lower())
         torch.cuda.empty_cache()
@@ -1362,6 +1366,8 @@ class DynReconstructionSolver:
             raise ValueError(f"total_steps must be >= 0, got {total_steps}")
         if anchor_views_per_step <= 0 or fuse_views_per_step <= 0:
             raise ValueError("anchor_views_per_step and fuse_views_per_step must be > 0")
+        if checkpoint_interval < 0:
+            raise ValueError(f"checkpoint_interval must be >= 0, got {checkpoint_interval}")
 
         device = anchor_s2d.rgb.device
         d_flag = d_model is not None
@@ -1503,6 +1509,94 @@ class DynReconstructionSolver:
             plt.savefig(osp.join(self.log_dir, f"{phase_name}_optim_loss.jpg"))
             plt.close()
 
+        def checkpoint_paths(tag):
+            ckpt_dir = osp.join(self.log_dir, f"{phase_name}_checkpoints")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            prefix = osp.join(ckpt_dir, f"{phase_name}_{tag}")
+            return {
+                "dir": ckpt_dir,
+                "prefix": prefix,
+                "cam": prefix + "_cam.pth",
+                "static": prefix + f"_s_model_{GS_BACKEND.lower()}.pth",
+                "dynamic": prefix + f"_d_model_{GS_BACKEND.lower()}.pth",
+                "state": prefix + "_state.pth",
+                "latest_state": osp.join(ckpt_dir, "latest_checkpoint_state.pth"),
+            }
+
+        def save_resume_checkpoint(step, latest_track_event, loss_pack, final=False):
+            tag = "final" if final else f"step_{step + 1:06d}"
+            paths = checkpoint_paths(tag)
+            torch.save(anchor_cams.state_dict(), paths["cam"])
+            torch.save(s_model.state_dict(), paths["static"])
+            if d_flag:
+                torch.save(d_model.state_dict(), paths["dynamic"])
+            shutil.copyfile(
+                paths["cam"], osp.join(self.log_dir, f"{phase_name}_cam.pth")
+            )
+            shutil.copyfile(
+                paths["static"],
+                osp.join(self.log_dir, f"{phase_name}_s_model_{GS_BACKEND.lower()}.pth"),
+            )
+            if d_flag:
+                shutil.copyfile(
+                    paths["dynamic"],
+                    osp.join(self.log_dir, f"{phase_name}_d_model_{GS_BACKEND.lower()}.pth"),
+                )
+            state_payload = {
+                "step": int(step),
+                "next_step": int(step + 1),
+                "latest_track_event": int(latest_track_event),
+                "phase_name": phase_name,
+                "gs_backend": GS_BACKEND.lower(),
+                "d_flag": bool(d_flag),
+                "cam_path": osp.basename(paths["cam"]),
+                "static_path": osp.basename(paths["static"]),
+                "dynamic_path": osp.basename(paths["dynamic"]) if d_flag else None,
+                "optimizer_static": optimizer_static.state_dict(),
+                "optimizer_dynamic": (
+                    optimizer_dynamic.state_dict() if optimizer_dynamic is not None else None
+                ),
+                "loss_pack": loss_pack,
+                "numpy_rng_state": np.random.get_state(),
+                "torch_rng_state": torch.get_rng_state(),
+            }
+            if torch.cuda.is_available():
+                state_payload["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+            torch.save(state_payload, paths["state"])
+            shutil.copyfile(paths["state"], paths["latest_state"])
+            logging.info(
+                "Saved %s checkpoint for %s at step=%d",
+                "final" if final else "resume",
+                phase_name,
+                step + 1,
+            )
+
+        def resolve_resume_state_path(resume_checkpoint):
+            if resume_checkpoint is None:
+                return None
+            if osp.isdir(resume_checkpoint):
+                latest_state = osp.join(
+                    resume_checkpoint, f"{phase_name}_checkpoints", "latest_checkpoint_state.pth"
+                )
+                legacy_latest_state = osp.join(resume_checkpoint, "latest_checkpoint_state.pth")
+                if osp.exists(latest_state):
+                    return latest_state
+                if osp.exists(legacy_latest_state):
+                    return legacy_latest_state
+                state_candidates = sorted(
+                    glob.glob(
+                        osp.join(
+                            resume_checkpoint,
+                            f"{phase_name}_checkpoints",
+                            f"{phase_name}_step_*_state.pth",
+                        )
+                    )
+                )
+                if state_candidates:
+                    return state_candidates[-1]
+                return None
+            return resume_checkpoint
+
         loss_pack = {
             "total": [],
             "anchor_rgb": [],
@@ -1521,7 +1615,38 @@ class DynReconstructionSolver:
             "d_m": [],
         }
 
-        for step in tqdm(range(total_steps)):
+        start_step = 0
+        if resume_checkpoint is not None:
+            resume_state_path = resolve_resume_state_path(resume_checkpoint)
+            if resume_state_path is None or not osp.exists(resume_state_path):
+                raise FileNotFoundError(
+                    f"Could not find fuse resume checkpoint from {resume_checkpoint}"
+                )
+            logging.info("Resume fuse fit from checkpoint state %s", resume_state_path)
+            resume_state = torch.load(resume_state_path, map_location="cpu")
+            optimizer_static.load_state_dict(resume_state["optimizer_static"])
+            if d_flag and optimizer_dynamic is not None:
+                opt_dyn_state = resume_state.get("optimizer_dynamic")
+                if opt_dyn_state is None:
+                    raise ValueError("Resume checkpoint is missing dynamic optimizer state")
+                optimizer_dynamic.load_state_dict(opt_dyn_state)
+            start_step = int(resume_state.get("next_step", resume_state["step"] + 1))
+            latest_track_event = int(resume_state.get("latest_track_event", 0))
+            loss_pack = resume_state.get("loss_pack", loss_pack)
+            np.random.set_state(resume_state["numpy_rng_state"])
+            torch.set_rng_state(resume_state["torch_rng_state"])
+            cuda_rng_state_all = resume_state.get("cuda_rng_state_all")
+            if cuda_rng_state_all is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(cuda_rng_state_all)
+            logging.info("Resumed fuse fit at step=%d / %d", start_step, total_steps)
+            if start_step >= total_steps:
+                logging.warning(
+                    "Resume checkpoint already reached next_step=%d >= total_steps=%d; skip loop",
+                    start_step,
+                    total_steps,
+                )
+
+        for step in tqdm(range(start_step, total_steps), initial=start_step, total=total_steps):
             stage = get_stage(step)
             apply_stage_lrs(step, stage)
 
@@ -1884,6 +2009,15 @@ class DynReconstructionSolver:
                 step % viz_cheap_interval == 0 or step == total_steps - 1
             ):
                 plot_fuse_losses(loss_pack)
+            if checkpoint_interval > 0 and (
+                (step + 1) % checkpoint_interval == 0 or step == total_steps - 1
+            ):
+                save_resume_checkpoint(
+                    step=step,
+                    latest_track_event=latest_track_event,
+                    loss_pack=loss_pack,
+                    final=(step == total_steps - 1),
+                )
 
         s_save_fn = osp.join(self.log_dir, f"{phase_name}_s_model_{GS_BACKEND.lower()}.pth")
         torch.save(s_model.state_dict(), s_save_fn)
@@ -1893,6 +2027,12 @@ class DynReconstructionSolver:
                 self.log_dir, f"{phase_name}_d_model_{GS_BACKEND.lower()}.pth"
             )
             torch.save(d_model.state_dict(), d_save_fn)
+        save_resume_checkpoint(
+            step=max(total_steps - 1, start_step - 1),
+            latest_track_event=latest_track_event,
+            loss_pack=loss_pack,
+            final=True,
+        )
 
         plot_fuse_losses(loss_pack)
         if total_steps > 0:

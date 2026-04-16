@@ -1,16 +1,17 @@
-fuse_name: cowboy_cat_gen3c_fuse
+fuse_name: cowboy_cat_fuse_gen3c_8k_4frame_very_aggressive
 
 # Existing MoSca run to fuse
-base_logdir: /home/atasoy/MoSca/runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850
-base_ws: /home/atasoy/MoSca/runs/cowboy_cat_original_scale
-base_fit_cfg: /home/atasoy/MoSca/profile/vipe/cowboy_cat_fit_fixed_scene.yaml
+base_logdir: runs/cowboy_cat_original_scale/logs/cowboy_cat_vipe_fixed_scene_native_add3_20260401_153850
+base_ws: runs/cowboy_cat_original_scale
+base_fit_cfg: profile/vipe/cowboy_cat_fit_fixed_scene.yaml
 
 # Fixed gen3c supervision sequence
 fuse_sequence_name: cowboy_cat_gen3c
-gen3c_rgb_dir: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/frames
-gen3c_dynamic_mask_dir: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/masks
-gen3c_pose_path: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/pose/normalized_nofilter.npz
-gen3c_intrinsics_path: /home/atasoy/MoSca/gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/intrinsics/normalized_nofilter.npz
+gen3c_rgb_dir: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/frames
+# gen3c_dynamic_mask_dir: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/rgb/masks
+gen3c_dynamic_mask_dir: null
+gen3c_pose_path: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/pose/normalized_nofilter.npz
+gen3c_intrinsics_path: gen3c-prior/cowboy-cat-zoom-in-out/gen3c/output/intrinsics/normalized_nofilter.npz
 gen3c_normalization_params: /dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/di35dov/monst3r/demo_tmp/vipe_results/121frames/cowboy-cat/scene/normalized_nofilter/normalization_params.json
 gen3c_normalization_mode: normalized_to_raw
 
@@ -27,7 +28,7 @@ fuse_gen3c_rgb_weight: 1.0
 fuse_gen3c_rgb_ssim_lambda: 0.1
 
 fuse_anchor_views_per_step: 1
-fuse_gen3c_views_per_step: 1
+fuse_gen3c_views_per_step: 4
 
 # Stage 1: Appearance-only updates
 fuse_stage1_steps: 0
@@ -48,18 +49,21 @@ fuse_decay_start: 2000
 fuse_geo_reg_start_steps: 0
 fuse_skinning_corr_start_steps: 10000000000
 
-fuse_s_ctrl_densify_steps: 400
-fuse_s_ctrl_prune_steps: 400
-fuse_s_ctrl_reset_steps: 2001
-fuse_s_ctrl_densify_max_grad: 0.0002
-fuse_s_ctrl_prune_opacity_th: 0.02
+# Very aggressive clone/prune schedule for a stronger ablation.
+fuse_s_ctrl_densify_steps: 100
+fuse_s_ctrl_prune_steps: 100
+fuse_s_ctrl_reset_steps: 1500
+fuse_s_ctrl_densify_max_grad: 0.0001
+fuse_s_ctrl_densify_percent_dense: 0.04
+fuse_s_ctrl_prune_opacity_th: 0.05
 fuse_s_ctrl_reset_opacity: 0.01
 
-fuse_d_ctrl_densify_steps: 300
-fuse_d_ctrl_prune_steps: 300
-fuse_d_ctrl_reset_steps: 1000
-fuse_d_ctrl_densify_max_grad: 0.0001
-fuse_d_ctrl_prune_opacity_th: 0.02
+fuse_d_ctrl_densify_steps: 100
+fuse_d_ctrl_prune_steps: 100
+fuse_d_ctrl_reset_steps: 750
+fuse_d_ctrl_densify_max_grad: 0.00005
+fuse_d_ctrl_densify_percent_dense: 0.04
+fuse_d_ctrl_prune_opacity_th: 0.05
 fuse_d_ctrl_reset_opacity: 0.01
 
 fuse_viz_cheap_interval: 500
