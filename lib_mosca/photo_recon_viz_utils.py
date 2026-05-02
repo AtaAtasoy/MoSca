@@ -124,7 +124,7 @@ def __get_move_around_cam_T_cw__(
         gs5,
         cams.default_H,
         cams.default_W,
-        cams.default_K,
+        cams.K(ind=move_around_id),
         cams.T_cw(move_around_id),
     )
     # depth = (render_dict["dep"] / (render_dict["alpha"] + 1e-6))[0]
@@ -385,7 +385,7 @@ def viz2d_one_frame(
     gs5 = [s_model()]
     if d_model is not None:
         gs5.append(d_model(model_tid))
-    render_dict = render(gs5, cams.default_H, cams.default_W, cams.default_K, T_cw)
+    render_dict = render(gs5, cams.default_H, cams.default_W, cams.K(ind=model_tid), T_cw)
     if rgb_mask is None:
         rgb_mask = s2d.get_mask_by_key(loss_mask_type)[model_tid].clone()
     _, rgb_loss_i, pred_rgb, gt_rgb = compute_rgb_loss(
@@ -448,7 +448,7 @@ def viz2d_one_frame(
             [d_model(model_tid)],
             cams.default_H,
             cams.default_W,
-            cams.default_K,
+            cams.K(ind=model_tid),
             T_cw,
             bg_color=[0.5, 0.5, 0.5],
         )
@@ -506,7 +506,7 @@ def make_viz_graph(d_model, view_ind, cams, view_cam_id=None, max_radius=0.001):
         o = torch.ones(len(node_mu), 1).to(node_mu) * 1.0
 
         render_dict = render_cam_pcl(
-            node_mu, fr, s, o, sph, H, W, CAM_K=cams.default_K, bg_color=BG_COLOR1
+            node_mu, fr, s, o, sph, H, W, CAM_K=cams.K(H, W, ind=0), bg_color=BG_COLOR1
         )
         rgb = render_dict["rgb"].permute(1, 2, 0).detach().cpu().numpy()
         rgb = np.clip(rgb, 0, 1)
@@ -578,7 +578,7 @@ def viz2d_flow_video(
         [s_model(0), d_model(start_from, 0, nn_fusion=-1)],
         H,
         W,
-        cams.default_K,
+        cams.K(H, W, ind=start_from),
         cams.T_cw(start_from),
     )
     visibility_mask = render_dict["visibility_filter"][-d_model.N :]
@@ -663,7 +663,7 @@ def viz2d_flow_video(
             working_sph.contiguous(),
             H,
             W,
-            CAM_K=cams.default_K,
+            CAM_K=cams.K(H, W, ind=_render_cam_id),
             bg_color=BG_COLOR1,
         )
         pred_rgb = render_dict["rgb"].permute(1, 2, 0)

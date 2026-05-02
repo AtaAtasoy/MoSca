@@ -20,7 +20,7 @@ class MonocularCameras(nn.Module):
         default_H,
         default_W,
         fxfycxcy: list = None,  # intr init 1, fxfy in deg, cxcy in ratio [53.1, 53.1, 0.5, 0.5]
-        K=None,  # intr init 2, K is 3x3 mat
+        K=None,  # intr init 2, K is 3x3 mat or T,3,3 mats
         #
         delta_flag=True,
         init_camera_pose=None,  # either T_wc in indep model; or T_i(i+1) in delta model
@@ -52,9 +52,15 @@ class MonocularCameras(nn.Module):
     @property
     def rel_focal(self):
         if self.iso_focal:
+            if self._rel_focal.ndim == 2:
+                return self._rel_focal[:, 0:1].expand(-1, 2)
             return self._rel_focal[0].repeat(2)
         else:
             return self._rel_focal
+
+    @property
+    def has_per_frame_intrinsics(self):
+        return self._rel_focal.ndim == 2
 
     def __len__(self):
         return self.T
@@ -77,7 +83,16 @@ class MonocularCameras(nn.Module):
             ckpt["_rel_focal"] = ckpt["rel_focal"]
             del ckpt["rel_focal"]
         T = len(ckpt["q_wc"])
-        cams = cls(n_time_steps=T, default_H=H, default_W=W, delta_flag=delta_flag)
+        init_K = None
+        if ckpt["_rel_focal"].ndim == 2 or ckpt["cxcy_ratio"].ndim == 2:
+            init_K = torch.eye(3)[None].repeat(T, 1, 1)
+        cams = cls(
+            n_time_steps=T,
+            default_H=H,
+            default_W=W,
+            K=init_K,
+            delta_flag=delta_flag,
+        )
         cams.load_state_dict(ckpt, strict=True)
         return cams
 
@@ -100,14 +115,26 @@ class MonocularCameras(nn.Module):
         else:
             assert fovxfovycxcy is None
             K, H, W = KHW
+            K = torch.as_tensor(K).float()
+            assert K.shape == (3, 3) or (
+                K.ndim == 3 and K.shape[1:] == (3, 3) and K.shape[0] == self.T
+            ), f"Expected K shape (3,3) or ({self.T},3,3), got {tuple(K.shape)}"
             H, W = float(H), float(W)
             L = min(H, W)
-            rel_focal_x = K[0, 0] / L * 2.0
-            rel_focal_y = K[1, 1] / L * 2.0
-            cx_ratio = K[0, 2] / W
-            cy_ratio = K[1, 2] / H
-            rel_focal = torch.Tensor([rel_focal_x, rel_focal_y]).squeeze()
-            cxcy_ratio = torch.Tensor([cx_ratio, cy_ratio])
+            if K.ndim == 2:
+                rel_focal_x = K[0, 0] / L * 2.0
+                rel_focal_y = K[1, 1] / L * 2.0
+                cx_ratio = K[0, 2] / W
+                cy_ratio = K[1, 2] / H
+                rel_focal = torch.stack([rel_focal_x, rel_focal_y]).squeeze()
+                cxcy_ratio = torch.stack([cx_ratio, cy_ratio])
+            else:
+                rel_focal_x = K[:, 0, 0] / L * 2.0
+                rel_focal_y = K[:, 1, 1] / L * 2.0
+                cx_ratio = K[:, 0, 2] / W
+                cy_ratio = K[:, 1, 2] / H
+                rel_focal = torch.stack([rel_focal_x, rel_focal_y], dim=-1)
+                cxcy_ratio = torch.stack([cx_ratio, cy_ratio], dim=-1)
         return rel_focal.float(), cxcy_ratio.float()
 
     def __get_init_qt__(self, init_camera_pose):
@@ -269,21 +296,35 @@ class MonocularCameras(nn.Module):
     ################################################################################
     # * Intrinsic
     ################################################################################
-    def K(self, H=None, W=None):
+    def K(self, H=None, W=None, ind=None):
         if H is None and W is None:
-            return self.default_K
+            H = self.default_H
+            W = self.default_W
         else:
             assert H is not None and W is not None, "H and W must be both provided"
         L = min(H, W)  # ! the rel means to rel to the short side
-        fx = self.rel_focal[0] * L / 2.0
-        fy = self.rel_focal[1] * L / 2.0
-        cx = W * self.cxcy_ratio[0]
-        cy = H * self.cxcy_ratio[1]
-        K = torch.eye(3).to(self.rel_focal)
-        K[0, 0] = K[0, 0] * 0 + fx
-        K[1, 1] = K[1, 1] * 0 + fy
-        K[0, 2] = K[0, 2] * 0 + cx
-        K[1, 2] = K[1, 2] * 0 + cy
+        rel_focal = self.rel_focal
+        cxcy_ratio = self.cxcy_ratio
+        if ind is not None:
+            rel_focal = rel_focal[ind] if rel_focal.ndim == 2 else rel_focal
+            cxcy_ratio = cxcy_ratio[ind] if cxcy_ratio.ndim == 2 else cxcy_ratio
+
+        fx = rel_focal[..., 0] * L / 2.0
+        fy = rel_focal[..., 1] * L / 2.0
+        cx = W * cxcy_ratio[..., 0]
+        cy = H * cxcy_ratio[..., 1]
+        if rel_focal.ndim == 1:
+            K = torch.eye(3).to(rel_focal)
+            K[0, 0] = K[0, 0] * 0 + fx
+            K[1, 1] = K[1, 1] * 0 + fy
+            K[0, 2] = K[0, 2] * 0 + cx
+            K[1, 2] = K[1, 2] * 0 + cy
+        else:
+            K = torch.eye(3).to(rel_focal)[None].repeat(len(rel_focal), 1, 1)
+            K[:, 0, 0] = K[:, 0, 0] * 0 + fx
+            K[:, 1, 1] = K[:, 1, 1] * 0 + fy
+            K[:, 0, 2] = K[:, 0, 2] * 0 + cx
+            K[:, 1, 2] = K[:, 1, 2] * 0 + cy
         return K
 
     @property
@@ -318,11 +359,11 @@ class MonocularCameras(nn.Module):
             ret.append({"params": [self.cxcy_ratio], "lr": lr_c, "name": "cxcy"})
         return ret
 
-    def backproject(self, uv, d):
-        return __backproject__(uv, d, self)
+    def backproject(self, uv, d, ind=None):
+        return __backproject__(uv, d, self, ind=ind)
 
-    def project(self, xyz, th=1e-5):
-        return __project__(xyz, self, th=th)
+    def project(self, xyz, th=1e-5, ind=None):
+        return __project__(xyz, self, th=th, ind=ind)
 
     def trans_pts_to_world(self, tid, pts_c):
         assert pts_c.shape[-1] == 3  # and pts_c.ndim == 2
@@ -356,7 +397,7 @@ class MonocularCameras(nn.Module):
         return torch.from_numpy(uv).to(self.rel_focal).to(self.rel_focal.device)
 
 
-def __project__(xyz, cams, th=1e-5):
+def __project__(xyz, cams, th=1e-5, ind=None):
     # assert xyz.ndim == 2
     assert xyz.shape[-1] == 3
     xy = xyz[..., :2]
@@ -372,12 +413,18 @@ def __project__(xyz, cams, th=1e-5):
         )  # ! always clamp to positive
         assert not (abs(z) < th).any()
     rel_f = torch.as_tensor(cams.rel_focal).to(xyz)
-    cxcy = torch.as_tensor(cams.cxcy_ratio).to(xyz) * 2.0 - 1.0
+    cxcy = torch.as_tensor(cams.cxcy_ratio).to(xyz)
+    if ind is not None:
+        rel_f = rel_f[ind] if rel_f.ndim == 2 else rel_f
+        cxcy = cxcy[ind] if cxcy.ndim == 2 else cxcy
+    elif rel_f.ndim == 2:
+        raise ValueError("Per-frame intrinsics require an explicit ind for project()")
+    cxcy = cxcy * 2.0 - 1.0
     uv = (xy * rel_f[None] / z) + cxcy[None, :]
     return uv  # [-1,1]
 
 
-def __backproject__(uv, d, cams):
+def __backproject__(uv, d, cams, ind=None):
     # assert uv.ndim == 2
     # uv: always be [-1,+1] on the short side
     assert uv.ndim == d.ndim + 1
@@ -385,7 +432,13 @@ def __backproject__(uv, d, cams):
     dep = d[..., None]
     rel_f = torch.as_tensor(cams.rel_focal).to(uv)
     # focal = rel_f / 2.0 * min(H, W)
-    cxcy = torch.as_tensor(cams.cxcy_ratio).to(uv) * 2.0 - 1.0
+    cxcy = torch.as_tensor(cams.cxcy_ratio).to(uv)
+    if ind is not None:
+        rel_f = rel_f[ind] if rel_f.ndim == 2 else rel_f
+        cxcy = cxcy[ind] if cxcy.ndim == 2 else cxcy
+    elif rel_f.ndim == 2:
+        raise ValueError("Per-frame intrinsics require an explicit ind for backproject()")
+    cxcy = cxcy * 2.0 - 1.0
     xy = (uv - cxcy[None, :]) * dep / rel_f[None]
     z = dep
     xyz = torch.cat([xy, z], dim=-1)

@@ -106,6 +106,16 @@ def _convert_camera_pose_convention(T_wc_list, camera_convention):
     raise ValueError(f"Unsupported camera_convention={camera_convention}")
 
 
+def _intrinsics_rows_to_K(intr_data):
+    intr_data = np.asarray(intr_data, dtype=np.float32)
+    K = np.tile(np.eye(3, dtype=np.float32), (len(intr_data), 1, 1))
+    K[:, 0, 0] = intr_data[:, 0]
+    K[:, 1, 1] = intr_data[:, 1]
+    K[:, 0, 2] = intr_data[:, 2]
+    K[:, 1, 2] = intr_data[:, 3]
+    return K
+
+
 def load_vipe_camera_priors(
     pose_npz_path,
     intrinsics_npz_path,
@@ -132,29 +142,21 @@ def load_vipe_camera_priors(
             pose_inds, expected_inds
         ), f"Expected contiguous frame indices 0..{expected_T-1}, got {pose_inds[:5]}...{pose_inds[-5:]}"
 
-    intr_ref = intr_data[0]
-    intr_delta = np.abs(intr_data - intr_ref[None]).max()
-    if intr_delta > intrinsics_tol:
-        raise ValueError(
-            "VIPE intrinsics vary across time, but MonocularCameras currently expects "
-            f"shared intrinsics. Max deviation was {intr_delta:.6f}."
-        )
-
-    fx, fy, cx, cy = intr_ref.tolist()
-    K = np.eye(3, dtype=np.float32)
-    K[0, 0] = fx
-    K[1, 1] = fy
-    K[0, 2] = cx
-    K[1, 2] = cy
+    intr_delta = np.abs(intr_data - intr_data[0][None]).max()
+    K = _intrinsics_rows_to_K(intr_data)
+    fx, fy, cx, cy = intr_data[0].tolist()
 
     logging.info(
-        "Loaded VIPE camera priors from %s with T=%d, fx=%.3f, fy=%.3f, cx=%.3f, cy=%.3f, convention=%s",
+        "Loaded VIPE camera priors from %s with T=%d, K_shape=%s, first fx=%.3f, fy=%.3f, cx=%.3f, cy=%.3f, intrinsics=%s, max_delta=%.6f, convention=%s",
         pose_npz_path,
         len(pose_data),
+        K.shape,
         fx,
         fy,
         cx,
         cy,
+        "shared" if intr_delta <= intrinsics_tol else "per-frame",
+        intr_delta,
         camera_convention,
     )
     pose_data = _convert_camera_pose_convention(pose_data, camera_convention)
@@ -168,28 +170,71 @@ def load_vipe_camera_priors(
 
 def load_vipe_intrinsics_K(intrinsics_npz_path):
     intr_data, _ = _load_intrinsics_data_and_inds(intrinsics_npz_path)
-    fx, fy, cx, cy = intr_data[0].tolist()
-    K = np.eye(3, dtype=np.float32)
-    K[0, 0] = fx
-    K[1, 1] = fy
-    K[0, 2] = cx
-    K[1, 2] = cy
-    return K
+    intr_delta = np.abs(intr_data - intr_data[0][None]).max()
+    if intr_delta > 1e-4:
+        logging.warning(
+            "load_vipe_intrinsics_K returns the first K for legacy preprocessing compatibility; input intrinsics vary with max_delta=%.6f",
+            intr_delta,
+        )
+    return _intrinsics_rows_to_K(intr_data)[0]
 
 
 def load_vipe_depth_priors(scene_dir, expected_T=None):
-    assert scene_dir is not None, "Expected a directory containing VIPE scene depth .npy files"
-    assert osp.isdir(scene_dir), f"VIPE scene directory not found: {scene_dir}"
-    depth_fns = sorted(glob(osp.join(scene_dir, "frame_*.npy")))
-    assert len(depth_fns) > 0, f"No frame_*.npy depth files found under {scene_dir}"
+    assert (
+        scene_dir is not None
+    ), "Expected a VIPE scene directory or stacked depth file path"
+
+    depth_path = None
+    dep_list = None
+
+    if osp.isfile(scene_dir):
+        if scene_dir.endswith(".npy"):
+            depth_path = scene_dir
+            dep_list = np.load(scene_dir).astype(np.float32)
+        elif scene_dir.endswith(".npz"):
+            depth_path = scene_dir
+            depth_npz = np.load(scene_dir, allow_pickle=True)
+            if "dep" in depth_npz.files:
+                dep_list = depth_npz["dep"].astype(np.float32)
+            elif "depth" in depth_npz.files:
+                dep_list = depth_npz["depth"].astype(np.float32)
+            else:
+                raise ValueError(
+                    f"Unsupported depth npz keys in {scene_dir}: {depth_npz.files}"
+                )
+        else:
+            raise ValueError(f"Unsupported VIPE depth file: {scene_dir}")
+    else:
+        assert osp.isdir(scene_dir), f"VIPE scene directory not found: {scene_dir}"
+        stacked_depth = osp.join(scene_dir, "depth.npy")
+        if osp.exists(stacked_depth):
+            depth_path = stacked_depth
+            dep_list = np.load(stacked_depth).astype(np.float32)
+        else:
+            depth_fns = sorted(glob(osp.join(scene_dir, "frame_*.npy")))
+            assert (
+                len(depth_fns) > 0
+            ), f"No depth.npy or frame_*.npy depth files found under {scene_dir}"
+            if expected_T is not None:
+                assert (
+                    len(depth_fns) == expected_T
+                ), f"Expected {expected_T} VIPE depth files, found {len(depth_fns)}"
+            dep_list = np.stack([np.load(fn).astype(np.float32) for fn in depth_fns], 0)
+            depth_path = scene_dir
+
+    if dep_list.ndim == 2:
+        dep_list = dep_list[None]
+    assert (
+        dep_list.ndim == 3
+    ), f"Expected stacked VIPE depth shaped (T,H,W), got {dep_list.shape}"
     if expected_T is not None:
         assert (
-            len(depth_fns) == expected_T
-        ), f"Expected {expected_T} VIPE depth files, found {len(depth_fns)}"
-    dep_list = np.stack([np.load(fn).astype(np.float32) for fn in depth_fns], 0)
+            dep_list.shape[0] == expected_T
+        ), f"Expected {expected_T} VIPE depth frames, found {dep_list.shape[0]}"
+
     logging.info(
         "Loaded VIPE depth priors from %s with T=%d, H=%d, W=%d",
-        scene_dir,
+        depth_path,
         dep_list.shape[0],
         dep_list.shape[1],
         dep_list.shape[2],

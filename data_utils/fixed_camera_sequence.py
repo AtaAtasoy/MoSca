@@ -42,6 +42,35 @@ def load_rgb_frames_from_dir(rgb_dir):
 
 
 def load_binary_masks_from_dir(mask_dir, frame_names):
+    assert mask_dir is not None, "Expected a mask directory or stacked mask file path"
+
+    if osp.isfile(mask_dir):
+        if mask_dir.endswith(".npy"):
+            masks = np.load(mask_dir)
+        elif mask_dir.endswith(".npz"):
+            mask_npz = np.load(mask_dir, allow_pickle=True)
+            if "mask" in mask_npz.files:
+                masks = mask_npz["mask"]
+            elif "masks" in mask_npz.files:
+                masks = mask_npz["masks"]
+            else:
+                raise ValueError(
+                    f"Unsupported mask npz keys in {mask_dir}: {mask_npz.files}"
+                )
+        else:
+            raise ValueError(f"Unsupported mask file: {mask_dir}")
+        if masks.ndim == 2:
+            masks = masks[None]
+        assert (
+            masks.ndim == 3
+        ), f"Expected stacked mask shape (T,H,W), got {masks.shape}"
+        if len(frame_names) != masks.shape[0]:
+            raise ValueError(
+                f"RGB/mask length mismatch: {len(frame_names)} RGB frames vs {masks.shape[0]} masks in {mask_dir}"
+            )
+        masks = masks > 0
+        return torch.from_numpy(masks).bool()
+
     assert osp.isdir(mask_dir), f"Mask directory not found: {mask_dir}"
     mask_fns = [
         fn
@@ -60,14 +89,14 @@ def load_binary_masks_from_dir(mask_dir, frame_names):
         mask = imageio.imread(osp.join(mask_dir, mask_fn))
         if mask.ndim == 3:
             mask = mask[..., 0]
-        masks.append(mask > 127) # 
+        masks.append(mask > 127)
 
     masks = np.stack(masks, 0)
     H, W = masks.shape[1:3]
-    assert (
-        masks.ndim == 3
-    ), f"Expected mask frames shaped (T,H,W), got {masks.shape}"
-    assert all(mask.shape == (H, W) for mask in masks), "Mask frames must share one resolution"
+    assert masks.ndim == 3, f"Expected mask frames shaped (T,H,W), got {masks.shape}"
+    assert all(mask.shape == (H, W) for mask in masks), (
+        "Mask frames must share one resolution"
+    )
     return torch.from_numpy(masks).bool()
 
 
@@ -117,15 +146,30 @@ class FixedCameraRGBSequence:
         ), f"Expected contiguous frame inds 0..T-1, got {inds[:5]}...{inds[-5:]}"
         assert len(rgb) == len(T_wc), f"RGB/camera length mismatch: {len(rgb)} vs {len(T_wc)}"
 
-        fx, fy = float(K[0, 0]), float(K[1, 1])
-        cx, cy = float(K[0, 2]), float(K[1, 2])
+        assert K.shape == (len(rgb), 3, 3), (
+            f"Expected per-frame K shape ({len(rgb)},3,3), got {tuple(K.shape)}"
+        )
         H, W = rgb.shape[1:3]
-        if fx <= 0.0 or fy <= 0.0:
-            raise ValueError(f"Expected positive focal lengths, got fx={fx}, fy={fy}")
-        if not (0.0 <= cx <= float(W) and 0.0 <= cy <= float(H)):
+        fx = K[:, 0, 0]
+        fy = K[:, 1, 1]
+        cx = K[:, 0, 2]
+        cy = K[:, 1, 2]
+        if torch.any(fx <= 0.0) or torch.any(fy <= 0.0):
+            raise ValueError(
+                f"Expected positive focal lengths, got fx range=({float(fx.min()):.3f}, {float(fx.max()):.3f}), "
+                f"fy range=({float(fy.min()):.3f}, {float(fy.max()):.3f})"
+            )
+        if (
+            torch.any(cx < 0.0)
+            or torch.any(cx > float(W))
+            or torch.any(cy < 0.0)
+            or torch.any(cy > float(H))
+        ):
             raise ValueError(
                 f"Principal point must lie within the RGB resolution; got "
-                f"(cx, cy)=({cx:.3f}, {cy:.3f}) for (W, H)=({W}, {H})"
+                f"cx range=({float(cx.min()):.3f}, {float(cx.max()):.3f}), "
+                f"cy range=({float(cy.min()):.3f}, {float(cy.max()):.3f}) "
+                f"for (W, H)=({W}, {H})"
             )
 
         if prior_ws is not None and not osp.isdir(prior_ws):

@@ -153,6 +153,8 @@ def load_bundle_cameras(logdir: str, device: torch.device):
 
 
 def intrinsics_from_K(K_np, Intrinsics):
+    K_np = np.asarray(K_np)
+    assert K_np.shape == (3, 3), f"Expected one K with shape (3,3), got {K_np.shape}"
     return Intrinsics(
         float(K_np[0, 0]),
         float(K_np[1, 1]),
@@ -161,8 +163,20 @@ def intrinsics_from_K(K_np, Intrinsics):
     )
 
 
+def intrinsics_list_from_K(K_np, n_cameras, Intrinsics):
+    K_np = np.asarray(K_np)
+    if K_np.shape == (3, 3):
+        return [intrinsics_from_K(K_np, Intrinsics)] * n_cameras
+    assert K_np.shape == (
+        n_cameras,
+        3,
+        3,
+    ), f"Expected K shape (3,3) or ({n_cameras},3,3), got {K_np.shape}"
+    return [intrinsics_from_K(K_np[idx], Intrinsics) for idx in range(n_cameras)]
+
+
 def intrinsics_from_mosca_camera(cams: MonocularCameras, tid: int, Intrinsics):
-    K = cams.K(int(cams.default_H), int(cams.default_W)).detach().cpu().numpy()
+    K = cams.K(int(cams.default_H), int(cams.default_W), ind=tid).detach().cpu().numpy()
     return intrinsics_from_K(K, Intrinsics)
 
 
@@ -288,7 +302,7 @@ def get_input_training_sequence(
         T_wc = reference["T_wc"]
 
     if "K" in reference:
-        intrinsics = [intrinsics_from_K(reference["K"], Intrinsics)] * len(T_wc)
+        intrinsics = intrinsics_list_from_K(reference["K"], len(T_wc), Intrinsics)
     else:
         intrinsics = [intrinsics_from_mosca_camera(optimized_cams, 0, Intrinsics)] * len(
             T_wc
@@ -320,8 +334,8 @@ def get_explicit_test_sequence(args, cfg, optimized_cams, Intrinsics):
         optimized_T_wc,
         test_priors["T_wc"].detach().cpu().numpy(),
     )
-    intrinsics = [intrinsics_from_K(test_priors["K"].detach().cpu().numpy(), Intrinsics)] * len(
-        aligned
+    intrinsics = intrinsics_list_from_K(
+        test_priors["K"].detach().cpu().numpy(), len(aligned), Intrinsics
     )
     return {
         "name": "test_npz",
@@ -371,7 +385,7 @@ def build_intrinsics_list_for_camera_set(camera_set):
     if "intrinsics" in camera_set:
         return camera_set["intrinsics"]
     if "K" in camera_set:
-        return [intrinsics_from_K(camera_set["K"], Intrinsics)] * len(camera_set["T_wc"])
+        return intrinsics_list_from_K(camera_set["K"], len(camera_set["T_wc"]), Intrinsics)
     raise ValueError(
         f"Camera set '{camera_set.get('name', '<unnamed>')}' must provide either 'intrinsics' or 'K'"
     )

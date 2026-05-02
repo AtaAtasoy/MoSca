@@ -4,21 +4,22 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=40G
 #SBATCH --time=02:00:00
-#SBATCH --job-name=mosca-fuse-gen3c-8k-8frame-very-aggressive
+#SBATCH --job-name=mosca-fuse-gen3c-spiral-useful
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-user=ata.atasoy@tum.de
+
 source ~/.bashrc
 conda activate mosca
 
-MOSCA_DIR="${PROJECT_DIR}/MoSca"
+MOSCA_DIR="${PROJECT_DIR}/monst3r/agentic-cinematography/MoSca"
 
 cd "$MOSCA_DIR"
 
 mkdir -p logs
 
-PATCH_CFG="${MOSCA_DIR}/profile/vipe/cowboy_cat_fuse_gen3c_8k_8frame_very_aggressive.yaml"
+PATCH_CFG="${MOSCA_DIR}/profile/vipe/cowboy_cat_gen3c_fuse_spiral_useful.yaml"
 
 echo "MoSca dir  : $MOSCA_DIR"
 echo "Patch cfg  : $PATCH_CFG"

@@ -73,7 +73,7 @@ def parse_args():
         "--bg_color",
         type=float,
         nargs=3,
-        default=[1.0, 1.0, 1.0],
+        default=[0.5, 0.5, 0.5],
         help="Background color as RGB floats in [0,1]",
     )
     parser.add_argument(
@@ -136,7 +136,7 @@ def parse_args():
     parser.add_argument(
         "--test_camera_normalization_mode",
         type=str,
-        default=None,
+        default="normalized_to_raw",
         choices=["normalized_to_raw", "raw_to_normalized"],
         help="How to transform explicit test-camera poses with normalization_params.json",
     )
@@ -251,7 +251,9 @@ def build_intrinsics_from_focal(H, W, focal, cxcy_ratio, device):
 
 def build_intrinsics_from_K(K_src, device):
     K = torch.as_tensor(K_src, dtype=torch.float32, device=device).clone()
-    assert K.shape == (3, 3), f"Expected K shape (3,3), got {tuple(K.shape)}"
+    assert K.shape == (3, 3) or (
+        K.ndim == 3 and K.shape[1:] == (3, 3)
+    ), f"Expected K shape (3,3) or (T,3,3), got {tuple(K.shape)}"
     return K
 
 
@@ -423,19 +425,26 @@ def render_sequence(
     depth_dir = osp.join(save_root, "depth")
     depth_viz_dir = osp.join(save_root, "depth_viz")
     occupancy_dir = osp.join(save_root, "occupancy")
+    vace_mask_dir = osp.join(save_root, "vace_mask")
     os.makedirs(frame_dir, exist_ok=True)
     os.makedirs(depth_dir, exist_ok=True)
     os.makedirs(depth_viz_dir, exist_ok=True)
     os.makedirs(occupancy_dir, exist_ok=True)
+    os.makedirs(vace_mask_dir, exist_ok=True)
 
     T_cw_list = convert_T_wc_to_T_cw(T_wc_list, device=K.device, dtype=K.dtype)
+    if K.ndim == 3 and len(K) != len(T_cw_list):
+        raise ValueError(
+            f"Per-frame K length mismatch: {len(K)} intrinsics vs {len(T_cw_list)} poses"
+        )
     depth_frames = []
     for frame_idx, (T_cw, model_tid) in enumerate(zip(T_cw_list, model_tids)):
+        frame_K = K[frame_idx] if K.ndim == 3 else K
         render_dict = render(
             get_render_payload(region, s_model, d_model, int(model_tid)),
             H,
             W,
-            K,
+            frame_K,
             T_cw=T_cw,
             bg_color=bg_color,
         )
@@ -459,6 +468,7 @@ def render_sequence(
         save_rgb_frame(osp.join(frame_dir, f"{frame_idx:05d}.png"), rgb)
         save_depth_frame(osp.join(depth_dir, f"{frame_idx:05d}.npz"), depth)
         save_mask_frame(osp.join(occupancy_dir, f"{frame_idx:05d}.png"), occupancy)
+        save_mask_frame(osp.join(vace_mask_dir, f"{frame_idx:05d}.png"), ~occupancy)
         depth_frames.append(depth)
 
     depth_viz_frames = colorize_depth_frames(depth_frames)
@@ -469,6 +479,7 @@ def render_sequence(
         build_video_outputs(frame_dir, fps=fps, stem=sequence_name)
         build_video_outputs(depth_viz_dir, fps=fps, stem=f"{sequence_name}_depth_viz")
         build_video_outputs(occupancy_dir, fps=fps, stem=f"{sequence_name}_occupancy")
+        build_video_outputs(vace_mask_dir, fps=fps, stem="vace_mask")
 
 
 def get_train_sequence(cams):
@@ -546,8 +557,9 @@ def get_test_sequences(args, device):
     if args.test_height is not None and args.test_width is not None:
         H, W = int(args.test_height), int(args.test_width)
     else:
-        # Infer H,W from the principal point under the common cx=W/2, cy=H/2 convention.
-        H, W = int(K[1, 2].item() * 2), int(K[0, 2].item() * 2)
+        # Infer H,W from the first principal point under the common cx=W/2, cy=H/2 convention.
+        first_K = K[0] if K.ndim == 3 else K
+        H, W = int(first_K[1, 2].item() * 2), int(first_K[0, 2].item() * 2)
     return [
         {
             "name": args.test_camera_name,

@@ -359,13 +359,13 @@ def fetch_leaves_in_world_frame(
 
         dep_map = input_dep_list[t].clone()
         cam_pcl = cams.backproject(
-            cams.get_homo_coordinate_map(H, W)[mask2d].clone(), dep_map[mask2d]
+            cams.get_homo_coordinate_map(H, W)[mask2d].clone(), dep_map[mask2d], ind=t
         )
         cam_R_wc, cam_t_wc = cams.Rt_wc(t)
         mu = cams.trans_pts_to_world(t, cam_pcl)
         rgb_map = input_rgb_list[t].clone()
         rgb = rgb_map[mask2d]
-        K = cams.K(H, W)
+        K = cams.K(H, W, ind=t)
         radius = cam_pcl[:, -1] / (0.5 * K[0, 0] + 0.5 * K[1, 1]) * float(subsample)
         scale = torch.stack([radius / squeeze_normal_ratio, radius, radius], dim=-1)
         time_index = torch.ones_like(mu[:, 0]).long() * t
@@ -606,7 +606,7 @@ def error_grow_dyn_model(
         # convert to mu_w and get s_inti
         R_wc, t_wc = cams.Rt_wc(grow_tid)
         grow_mu_w = torch.einsum("ij,aj->ai", R_wc, grow_mu_cam) + t_wc[None]
-        K = cams.K(s2d.H, s2d.W)
+        K = cams.K(s2d.H, s2d.W, ind=grow_tid)
         grow_s = (
             grow_mu_cam[:, -1]
             / (0.5 * K[0, 0] + 0.5 * K[1, 1])
@@ -640,7 +640,7 @@ def identify_rendering_error(
     error_list = []
     for t in tqdm(range(d_model.T)):  # ! warning, d_model.T may smaller than cams.T
         gs5 = [s_model(), d_model(t)]
-        render_dict = render(gs5, s2d.H, s2d.W, cams.K(s2d.H, s2d.W), cams.T_cw(t))
+        render_dict = render(gs5, s2d.H, s2d.W, cams.K(s2d.H, s2d.W, ind=t), cams.T_cw(t))
         rgb_pred = render_dict["rgb"].permute(1, 2, 0)
         rgb_gt = s2d.rgb[t].clone()
         error = (rgb_pred - rgb_gt).abs().max(dim=-1).values
@@ -666,6 +666,7 @@ def __align_pixel_depth_scale_backproject__(
     dst,
     dst_mask,
     cams: MonocularCameras,
+    tid=None,
     knn=8,
     infrontflag=True,
 ):
@@ -681,11 +682,11 @@ def __align_pixel_depth_scale_backproject__(
     ratio = dst / (src + 1e-6)
     base_pts_ratio = ratio[base_mask]
 
-    query_pts = cams.backproject(homo_map[query_mask], src[query_mask])
+    query_pts = cams.backproject(homo_map[query_mask], src[query_mask], ind=tid)
 
     # backproject src depth to 3D
     if knn > 0:
-        base_pts = cams.backproject(homo_map[base_mask], src[base_mask])
+        base_pts = cams.backproject(homo_map[base_mask], src[base_mask], ind=tid)
         _, ind, _ = knn_points(query_pts[None], base_pts[None], K=knn)
         ind = ind[0]
         ratio = base_pts_ratio[ind]
@@ -719,7 +720,7 @@ def align_to_model_depth(
     gs5 = [s_model()]
     if d_model:
         gs5.append(d_model(tid))
-    render_dict = render(gs5, s2d.H, s2d.W, cams.K(s2d.H, s2d.W), cams.T_cw(tid))
+    render_dict = render(gs5, s2d.H, s2d.W, cams.K(s2d.H, s2d.W, ind=tid), cams.T_cw(tid))
     model_alpha = render_dict["alpha"].squeeze(0)
     model_dep = render_dict["dep"].squeeze(0)
     # align prior depth to current depth
@@ -736,6 +737,7 @@ def align_to_model_depth(
             ~working_mask
         ),  # ! warning, here manually use the original non-subsampled mask, because the dilated place is not reliable!
         cams=cams,
+        tid=tid,
         knn=dep_align_knn,
     )
     return new_mu_cam, ret_mask

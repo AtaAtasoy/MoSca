@@ -158,7 +158,7 @@ class DynReconstructionSolver:
             for query_tid in tqdm(range(s2d.T)):
                 query_dep = s2d.dep[query_tid].clone()  # H,W
                 query_xyz_cam = cams.backproject(
-                    cams.get_homo_coordinate_map(), query_dep
+                    cams.get_homo_coordinate_map(), query_dep, ind=query_tid
                 )
                 query_xyz_world = cams.trans_pts_to_world(
                     query_tid, query_xyz_cam
@@ -202,7 +202,7 @@ class DynReconstructionSolver:
         logging.info(f"Computing normal maps from depth maps using local SVD...")
         # the computed normals are always pointing backward, on -z direction
         ray_direction = cams.backproject(
-            s2d.homo_map.clone(), torch.ones_like(s2d.homo_map[..., 0])
+            s2d.homo_map.clone(), torch.ones_like(s2d.homo_map[..., 0]), ind=0
         )
         ray_direction = F.normalize(ray_direction, dim=-1)
         normal_map_list = []
@@ -211,7 +211,7 @@ class DynReconstructionSolver:
             dep = s2d.dep[t].clone()
             dep_mask = s2d.dep_mask[t].clone()
             normal_map = torch.zeros(*dep.shape, 3).to(dep)
-            xyz = cams.backproject(s2d.homo_map[dep_mask].clone(), dep[dep_mask])
+            xyz = cams.backproject(s2d.homo_map[dep_mask].clone(), dep[dep_mask], ind=t)
             vtx_map = torch.zeros_like(normal_map).float()
             vtx_map[dep_mask] = xyz
             normal_map, mask = estimate_normal_map(
@@ -646,7 +646,7 @@ class DynReconstructionSolver:
                     gs5,
                     s2d.H,
                     s2d.W,
-                    cams.K(s2d.H, s2d.W),
+                    cams.K(s2d.H, s2d.W, ind=view_ind),
                     cams.T_cw(view_ind),
                     bg_color=bg_color,
                     add_buffer=add_buffer,
@@ -681,7 +681,7 @@ class DynReconstructionSolver:
                             gs5,
                             s2d.H,
                             s2d.W,
-                            cams.K(s2d.H, s2d.W),
+                            cams.K(s2d.H, s2d.W, ind=view_ind),
                             cams.T_cw(view_ind),
                             bg_color=[0.0, 0.0, 0.0],
                             colors_precomp=dst_xyz_cam,
@@ -720,7 +720,7 @@ class DynReconstructionSolver:
                         if track_loss_mask.sum() == 0:
                             _loss_track = torch.zeros_like(_l_rgb)
                         else:
-                            pred_track_dst = cams.project(warped_xyz_cam)
+                            pred_track_dst = cams.project(warped_xyz_cam, ind=dst_ind)
                             L = min(s2d.W, s2d.H)
                             pred_track_dst[:, :1] = (
                                 (pred_track_dst[:, :1] + s2d.W / L) / 2.0 * L
@@ -784,7 +784,7 @@ class DynReconstructionSolver:
                         gs5,
                         s2d.H,
                         s2d.W,
-                        cams.K(s2d.H, s2d.W),
+                        cams.K(s2d.H, s2d.W, ind=view_ind),
                         cams.T_cw(view_ind),
                         bg_color=[0.0, 0.0, 0.0],
                     )
@@ -1087,7 +1087,7 @@ class DynReconstructionSolver:
                         [s_model(), d_model(view_ind)],
                         s2d.H,
                         s2d.W,
-                        cams.K(s2d.H, s2d.W),
+                        cams.K(s2d.H, s2d.W, ind=view_ind),
                         cams.T_cw(view_ind),
                         bg_color=[0.0, 0.0, 0.0],
                         colors_precomp=torch.from_numpy(viz_grad_color).to(photo_grad),
@@ -1113,7 +1113,7 @@ class DynReconstructionSolver:
                         [s_model(), d_model(view_ind)],
                         s2d.H,
                         s2d.W,
-                        cams.K(s2d.H, s2d.W),
+                        cams.K(s2d.H, s2d.W, ind=view_ind),
                         cams.T_cw(view_ind),
                         bg_color=[0.0, 0.0, 0.0],
                         colors_precomp=torch.from_numpy(viz_grad_color).to(corr_grad),
@@ -1730,7 +1730,7 @@ class DynReconstructionSolver:
                     gs5,
                     anchor_s2d.H,
                     anchor_s2d.W,
-                    anchor_cams.K(anchor_s2d.H, anchor_s2d.W),
+                    anchor_cams.K(anchor_s2d.H, anchor_s2d.W, ind=view_ind),
                     anchor_cams.T_cw(view_ind),
                     bg_color=bg_color,
                     add_buffer=add_buffer,
@@ -1762,7 +1762,7 @@ class DynReconstructionSolver:
                             gs5,
                             anchor_s2d.H,
                             anchor_s2d.W,
-                            anchor_cams.K(anchor_s2d.H, anchor_s2d.W),
+                            anchor_cams.K(anchor_s2d.H, anchor_s2d.W, ind=view_ind),
                             anchor_cams.T_cw(view_ind),
                             bg_color=[0.0, 0.0, 0.0],
                             colors_precomp=dst_xyz_cam,
@@ -1788,7 +1788,7 @@ class DynReconstructionSolver:
                         warped_xyz_cam = rendered_xyz_map.reshape(-1, 3)[src_fetch_index]
                         track_loss_mask = warped_xyz_cam[:, 2] > 1e-4
                         if track_loss_mask.sum() > 0:
-                            pred_track_dst = anchor_cams.project(warped_xyz_cam)
+                            pred_track_dst = anchor_cams.project(warped_xyz_cam, ind=dst_ind)
                             L = min(anchor_s2d.W, anchor_s2d.H)
                             pred_track_dst[:, :1] = (
                                 (pred_track_dst[:, :1] + anchor_s2d.W / L) / 2.0 * L
@@ -1841,7 +1841,7 @@ class DynReconstructionSolver:
                         gs5,
                         anchor_s2d.H,
                         anchor_s2d.W,
-                        anchor_cams.K(anchor_s2d.H, anchor_s2d.W),
+                        anchor_cams.K(anchor_s2d.H, anchor_s2d.W, ind=view_ind),
                         anchor_cams.T_cw(view_ind),
                         bg_color=[0.0, 0.0, 0.0],
                     )
@@ -1861,7 +1861,7 @@ class DynReconstructionSolver:
                     gs5,
                     fuse_seq.H,
                     fuse_seq.W,
-                    fuse_seq.K,
+                    fuse_seq.K[fuse_index],
                     convert_single_T_wc_to_T_cw(fuse_seq.T_wc[fuse_index]),
                     bg_color=bg_color,
                 )
@@ -2075,7 +2075,7 @@ class DynReconstructionSolver:
                 gs5,
                 cams.default_H,
                 cams.default_W,
-                cams.K(),
+                cams.K(ind=t),
                 cams.T_cw(t),
                 bg_color=[1.0, 1.0, 1.0],
             )
